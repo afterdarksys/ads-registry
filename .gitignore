@@ -1,0 +1,28 @@
+# Review and enhancement documents
+claude_review.md
+gemini_enhancements.md
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Build artifacts
+/ads-registry
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local

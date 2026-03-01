@@ -1,0 +1,30 @@
+{
+    "server": {
+        "address": "0.0.0.0",
+        "port": 5005,
+        "read_timeout": 300000000000,
+        "write_timeout": 300000000000,
+        "idle_timeout": 120000000000,
+        "read_header_timeout": 10000000000,
+        "tls": {
+            "enabled": false,
+            "port": 5006,
+            "cert_file": "certs/server.crt",
+            "key_file": "certs/server.key"
+        }
+    },
+    "database": {
+        "driver": "sqlite3",
+        "dsn": "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-64000&_foreign_keys=ON",
+        "max_open_conns": 1,
+        "max_idle_conns": 1,
+        "conn_max_lifetime": 0,
+        "db_check": true
+    },
+    "storage": {
+        "driver": "local",
+        "local": {
+            "root_directory": "data/blobs"
+        }
+    }
+}

@@ -1,0 +1,37 @@
+[Unit]
+Description=ADS Registry - Enterprise Container Registry
+Documentation=https://github.com/ryan/ads-registry
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=registry
+Group=registry
+
+# Update this path to where ads-registry is installed
+WorkingDirectory=/opt/ads-registry
+
+# The core execution command
+ExecStart=/opt/ads-registry/ads-registry serve
+
+# Restart policy for high availability
+Restart=on-failure
+RestartSec=5s
+
+# File descriptors and memory lock limits
+LimitNOFILE=1048576
+LimitNPROC=512
+LimitCORE=infinity
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+
+[Install]
+WantedBy=multi-user.target

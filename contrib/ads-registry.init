@@ -1,0 +1,114 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          ads-registry
+# Required-Start:    $network $local_fs $syslog
+# Required-Stop:     $network $local_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start ADS Registry server
+# Description:       ADS Registry - Enterprise Container Registry Platform
+### END INIT INFO
+
+NAME="ads-registry"
+DESC="ADS Registry Server"
+DAEMON="/opt/ads-registry/ads-registry"
+DAEMON_ARGS="serve"
+PIDFILE="/var/run/$NAME.pid"
+LOGFILE="/var/log/$NAME.log"
+USER="registry"
+
+# Check if daemon exists
+[ -x "$DAEMON" ] || exit 0
+
+start() {
+    echo -n "Starting $DESC: "
+    if [ -f $PIDFILE ]; then
+        PID=$(cat $PIDFILE)
+        if kill -0 $PID 2>/dev/null; then
+            echo "$NAME is already running (PID $PID)"
+            return 1
+        else
+            echo "Removing stale PID file"
+            rm -f $PIDFILE
+        fi
+    fi
+
+    # Start the daemon
+    su -s /bin/sh $USER -c "$DAEMON $DAEMON_ARGS > $LOGFILE 2>&1 & echo \$!" > $PIDFILE
+    
+    # Check if started successfully
+    sleep 1
+    if kill -0 $(cat $PIDFILE) 2>/dev/null; then
+        echo "OK"
+    else
+        echo "Failed to start"
+        rm -f $PIDFILE
+        return 1
+    fi
+}
+
+stop() {
+    echo -n "Stopping $DESC: "
+    if [ -f $PIDFILE ]; then
+        PID=$(cat $PIDFILE)
+        if kill -0 $PID 2>/dev/null; then
+            kill $PID
+            # Wait for process to exit
+            for i in 1 2 3 4 5; do
+                if ! kill -0 $PID 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+            if kill -0 $PID 2>/dev/null; then
+                echo "Failed to stop gracefully, sending SIGKILL"
+                kill -9 $PID
+            fi
+            echo "OK"
+        else
+            echo "Process not running"
+        fi
+        rm -f $PIDFILE
+    else
+        echo "PID file not found"
+    fi
+}
+
+status() {
+    if [ -f $PIDFILE ]; then
+        PID=$(cat $PIDFILE)
+        if kill -0 $PID 2>/dev/null; then
+            echo "$NAME is running (PID $PID)"
+            return 0
+        else
+            echo "$NAME is not running (stale PID file)"
+            return 1
+        fi
+    else
+        echo "$NAME is not running"
+        return 3
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
