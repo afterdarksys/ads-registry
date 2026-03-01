@@ -9,8 +9,13 @@ gemini_enhancements.md
 
 # Build artifacts
 /ads-registry
+*.exe
+*.dll
+*.so
+*.dylib
 dist/
 build/
+bin/
 
 # IDE
 .vscode/
