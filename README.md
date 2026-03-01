@@ -28,8 +28,10 @@ A production-ready, OCI-compliant Docker container registry with built-in securi
 ### 📊 Operations
 - **Health Checks** - Kubernetes liveness/readiness probes
 - **Prometheus Metrics** - Comprehensive observability
+- **Enterprise Logging** - Syslog and Elasticsearch integration
 - **Graceful Shutdown** - Clean worker termination
 - **Multi-database** - SQLite for dev, PostgreSQL for production
+- **HashiCorp Vault** - Secure secrets management
 
 ### 🎨 Additional Features
 - **Starlark Automation** - Programmable event handlers
@@ -144,6 +146,28 @@ Edit `config.json` to customize behavior:
       "root_directory": "data/blobs"
     }
   },
+  "logging": {
+    "syslog": {
+      "enabled": false,
+      "server": "local",
+      "tag": "ads-registry",
+      "priority": "INFO"
+    },
+    "elasticsearch": {
+      "enabled": false,
+      "endpoint": "http://localhost:9200",
+      "index": "ads-registry",
+      "username": "",
+      "password": ""
+    }
+  },
+  "vault": {
+    "enabled": false,
+    "address": "http://localhost:8200",
+    "token": "",
+    "mount_path": "secret",
+    "key_path": "ads-registry/jwt-keys"
+  },
   "webhooks": [
     "http://your-webhook-endpoint.com/events"
   ]
@@ -158,6 +182,73 @@ Override config with environment variables:
 - `REGISTRY_TLS_CERT` - TLS certificate path
 - `REGISTRY_TLS_KEY` - TLS private key path
 - `USE_POSTGRES` - Enable built-in PostgreSQL (Docker only)
+
+### Enterprise Logging
+
+ADS Registry supports multiple enterprise logging backends:
+
+#### Syslog
+
+Send logs to local or remote syslog servers:
+
+```json
+{
+  "logging": {
+    "syslog": {
+      "enabled": true,
+      "server": "udp://syslog.company.com:514",
+      "tag": "ads-registry",
+      "priority": "INFO"
+    }
+  }
+}
+```
+
+Supported protocols:
+- `local` - Local syslog
+- `tcp://host:port` - Remote syslog over TCP
+- `udp://host:port` - Remote syslog over UDP (default)
+- `unix:///path/to/socket` - Unix domain socket
+
+#### Elasticsearch
+
+Send structured logs to Elasticsearch for centralized log management:
+
+```json
+{
+  "logging": {
+    "elasticsearch": {
+      "enabled": true,
+      "endpoint": "http://elasticsearch.company.com:9200",
+      "index": "ads-registry",
+      "username": "elastic",
+      "password": "your-password"
+    }
+  }
+}
+```
+
+Logs are automatically indexed with date suffix (e.g., `ads-registry-2026.03.01`).
+
+### HashiCorp Vault Integration
+
+Securely retrieve JWT signing keys from HashiCorp Vault:
+
+```json
+{
+  "vault": {
+    "enabled": true,
+    "address": "https://vault.company.com:8200",
+    "token": "s.your-vault-token",
+    "mount_path": "secret",
+    "key_path": "ads-registry/jwt-keys"
+  }
+}
+```
+
+The registry expects the Vault secret to contain:
+- `private_key` - PEM-encoded RSA private key
+- `public_key` - PEM-encoded RSA public key
 
 ## Kubernetes Deployment
 
@@ -336,13 +427,19 @@ Available at `/metrics`:
 
 ### Logging
 
-Structured logs include:
+Enterprise-grade structured logs include:
 
-- Request/response details
-- Authentication events
-- Policy decisions
-- Scan results
-- Errors and warnings
+- **HTTP Requests**: Method, path, status code, duration, user agent, remote IP
+- **Authentication**: Login attempts, token generation, authorization decisions
+- **Policy Decisions**: Admission control allow/deny with rationale
+- **Scan Results**: Vulnerability counts by severity
+- **System Events**: Startup, shutdown, configuration changes
+- **Errors and Warnings**: Full context and stack traces
+
+All logs are sent simultaneously to:
+1. **stdout** - Container logs
+2. **Syslog** - Traditional log aggregation (if enabled)
+3. **Elasticsearch** - Structured log analytics (if enabled)
 
 ## Troubleshooting
 

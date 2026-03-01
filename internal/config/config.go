@@ -12,6 +12,8 @@ type Config struct {
 	Database DatabaseConfig `json:"database"`
 	Storage  StorageConfig  `json:"storage"`
 	Auth     AuthConfig     `json:"auth"`
+	Logging  LoggingConfig  `json:"logging"`
+	Vault    VaultConfig    `json:"vault"`
 	Webhooks []string       `json:"webhooks"`
 }
 
@@ -63,6 +65,34 @@ type AuthConfig struct {
 	TokenService string `json:"token_service"`
 	PrivateKey   string `json:"private_key_path"`
 	PublicKey    string `json:"public_key_path"`
+}
+
+type LoggingConfig struct {
+	Syslog        SyslogConfig        `json:"syslog"`
+	Elasticsearch ElasticsearchConfig `json:"elasticsearch"`
+}
+
+type SyslogConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Server   string `json:"server"`   // "local", "tcp://host:port", "udp://host:port", "unix:///path"
+	Tag      string `json:"tag"`      // Defaults to "ads-registry"
+	Priority string `json:"priority"` // DEBUG, INFO, WARNING, ERROR, CRITICAL
+}
+
+type ElasticsearchConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Endpoint string `json:"endpoint"` // e.g., "http://localhost:9200"
+	Index    string `json:"index"`    // Base index name, will append date
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type VaultConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Address   string `json:"address"`    // e.g., "http://localhost:8200"
+	Token     string `json:"token"`      // Vault token for authentication
+	MountPath string `json:"mount_path"` // KV mount path, e.g., "secret"
+	KeyPath   string `json:"key_path"`   // Path to JWT keys in Vault
 }
 
 // LoadFile reads and parses a JSON configuration file into the Config struct.

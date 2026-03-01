@@ -22,11 +22,13 @@ import (
 	"github.com/ryan/ads-registry/internal/db/postgres"
 	"github.com/ryan/ads-registry/internal/db/sqlite"
 	"github.com/ryan/ads-registry/internal/health"
+	"github.com/ryan/ads-registry/internal/logging"
 	"github.com/ryan/ads-registry/internal/policy"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/scanner/trivy"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/storage/local"
+	"github.com/ryan/ads-registry/internal/vault"
 	"github.com/ryan/ads-registry/internal/webhooks"
 	"github.com/spf13/cobra"
 )
@@ -79,6 +81,56 @@ func runServer() {
 		}
 	}
 
+	// Initialize enterprise logging
+	logCfg := logging.Config{
+		SyslogEnabled:  cfg.Logging.Syslog.Enabled,
+		SyslogServer:   cfg.Logging.Syslog.Server,
+		SyslogTag:      cfg.Logging.Syslog.Tag,
+		SyslogPriority: cfg.Logging.Syslog.Priority,
+		Elasticsearch: logging.ElasticsearchConfig{
+			Enabled:  cfg.Logging.Elasticsearch.Enabled,
+			Endpoint: cfg.Logging.Elasticsearch.Endpoint,
+			Index:    cfg.Logging.Elasticsearch.Index,
+			Username: cfg.Logging.Elasticsearch.Username,
+			Password: cfg.Logging.Elasticsearch.Password,
+		},
+	}
+
+	logger, err := logging.NewLogger(logCfg)
+	if err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Close()
+
+	if err := logging.InitGlobalLogger(logCfg); err != nil {
+		log.Fatalf("Failed to initialize global logger: %v", err)
+	}
+
+	logger.Info("ADS Container Registry starting up")
+	if cfg.Logging.Syslog.Enabled {
+		logger.Info(fmt.Sprintf("Syslog enabled: %s", cfg.Logging.Syslog.Server))
+	}
+	if cfg.Logging.Elasticsearch.Enabled {
+		logger.Info(fmt.Sprintf("Elasticsearch logging enabled: %s", cfg.Logging.Elasticsearch.Endpoint))
+	}
+
+	// Initialize Vault integration if enabled
+	if cfg.Vault.Enabled {
+		logger.Info(fmt.Sprintf("Vault integration enabled: %s", cfg.Vault.Address))
+		vaultClient := vault.NewClient(cfg.Vault.Address, cfg.Vault.Token, cfg.Vault.MountPath)
+
+		// Health check Vault connectivity
+		if err := vaultClient.HealthCheck(); err != nil {
+			logger.Error("Vault health check failed", err)
+			log.Fatalf("Failed to connect to Vault: %v", err)
+		}
+
+		logger.Info("Vault health check passed")
+
+		// Note: JWT key retrieval from Vault would happen in auth token service initialization
+		// For now we're just validating connectivity
+	}
+
 	// 1. Init Database
 	var store db.Store
 	switch cfg.Database.Driver {
@@ -90,10 +142,11 @@ func runServer() {
 		log.Fatalf("unsupported database driver %s", cfg.Database.Driver)
 	}
 	if err != nil {
+		logger.Error("Failed to initialize database", err)
 		log.Fatalf("failed to init db: %v", err)
 	}
 	defer store.Close()
-	log.Printf("Initialized Database: %s", cfg.Database.Driver)
+	logger.Info(fmt.Sprintf("Initialized Database: %s", cfg.Database.Driver))
 
 	// 2. Init Storage
 	var storageProvider storage.Provider
@@ -103,13 +156,14 @@ func runServer() {
 		log.Fatalf("unsupported storage driver %s", cfg.Storage.Driver)
 	}
 	if err != nil {
+		logger.Error("Failed to initialize storage", err)
 		log.Fatalf("failed to init storage: %v", err)
 	}
-	log.Printf("Initialized Storage: %s", cfg.Storage.Driver)
+	logger.Info(fmt.Sprintf("Initialized Storage: %s", cfg.Storage.Driver))
 
 	// 3. Router
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(logging.HTTPLoggingMiddleware(logger)) // Enterprise logging middleware
 	r.Use(middleware.Recoverer)
 	r.Use(httprate.LimitByIP(100, 1*time.Minute))
 
@@ -174,8 +228,9 @@ func runServer() {
 	}
 
 	go func() {
-		log.Printf("Starting registry on %s:%d", cfg.Server.Address, cfg.Server.Port)
+		logger.Info(fmt.Sprintf("Starting registry on %s:%d", cfg.Server.Address, cfg.Server.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Critical("Server error", err)
 			log.Fatalf("server error: %v", err)
 		}
 	}()
@@ -191,9 +246,10 @@ func runServer() {
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 		}
 		go func() {
-			log.Printf("Starting secure registry on %s:%d", cfg.Server.Address, cfg.Server.TLS.Port)
+			logger.Info(fmt.Sprintf("Starting secure registry on %s:%d", cfg.Server.Address, cfg.Server.TLS.Port))
 			// It is critical that users provision legitimate certs to CertFile and KeyFile for this to bind successfully
 			if err := srvTLS.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+				logger.Critical("Secure server error", err)
 				log.Fatalf("secure server error: %v", err)
 			}
 		}()
@@ -203,26 +259,30 @@ func runServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down server...")
+	logger.Warning("Received shutdown signal, shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("HTTP Server forced to shutdown: %v", err)
+		logger.Error("HTTP Server forced to shutdown", err)
+	} else {
+		logger.Info("HTTP Server shutdown gracefully")
 	}
 
 	if srvTLS != nil {
 		if err := srvTLS.Shutdown(ctx); err != nil {
-			log.Printf("HTTPS Server forced to shutdown: %v", err)
+			logger.Error("HTTPS Server forced to shutdown", err)
+		} else {
+			logger.Info("HTTPS Server shutdown gracefully")
 		}
 	}
 
 	// Close database connection
-	log.Println("Closing database connection...")
+	logger.Info("Closing database connection...")
 	if err := store.Close(); err != nil {
-		log.Printf("Error closing database: %v", err)
+		logger.Error("Error closing database", err)
 	}
 
-	log.Println("Server exited cleanly")
+	logger.Info("Server exited cleanly")
 }

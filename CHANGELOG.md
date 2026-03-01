@@ -5,6 +5,86 @@ All notable changes to the ADS Container Registry will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-02
+
+### Added - Enterprise Operations
+
+#### Logging Infrastructure
+- **Syslog Support** - Send logs to local or remote syslog servers (TCP/UDP/Unix)
+- **Elasticsearch Integration** - Structured log aggregation via REST API
+- **Multi-Destination Logging** - Simultaneous logging to stdout, syslog, and Elasticsearch
+- **HTTP Request Logging** - Enterprise-grade request/response tracking with timing
+- **Structured Logging** - JSON-formatted logs with full context
+
+#### Secrets Management
+- **HashiCorp Vault Integration** - Secure JWT key retrieval from Vault
+- **Vault Health Checks** - Automatic connectivity verification on startup
+- **KV v2 Support** - Compatible with Vault KV secrets engine v2
+- **Configurable Mount Paths** - Flexible Vault secret organization
+
+#### Configuration
+- Added `logging` section to config.json for syslog and Elasticsearch
+- Added `vault` section to config.json for HashiCorp Vault integration
+- Environment variable support for Vault token and Elasticsearch credentials
+
+### Enhanced
+- **Startup Logging** - Detailed initialization logs showing enabled features
+- **Shutdown Logging** - Graceful shutdown with connection cleanup logs
+- **Error Context** - Enhanced error messages with structured logging
+
+### Technical Details
+
+#### New Packages
+- `internal/logging` - Enterprise logging infrastructure
+- `internal/vault` - HashiCorp Vault client
+
+#### Dependencies
+- No additional external dependencies (uses stdlib crypto/x509, net/http, log/syslog)
+
+#### Configuration Examples
+
+**Syslog:**
+```json
+{
+  "logging": {
+    "syslog": {
+      "enabled": true,
+      "server": "udp://syslog.company.com:514",
+      "tag": "ads-registry",
+      "priority": "INFO"
+    }
+  }
+}
+```
+
+**Elasticsearch:**
+```json
+{
+  "logging": {
+    "elasticsearch": {
+      "enabled": true,
+      "endpoint": "http://elasticsearch:9200",
+      "index": "ads-registry",
+      "username": "elastic",
+      "password": "changeme"
+    }
+  }
+}
+```
+
+**Vault:**
+```json
+{
+  "vault": {
+    "enabled": true,
+    "address": "https://vault.company.com:8200",
+    "token": "s.your-token",
+    "mount_path": "secret",
+    "key_path": "ads-registry/jwt-keys"
+  }
+}
+```
+
 ## [0.1.0] - 2026-03-01
 
 ### Added - Initial Release 🚀
