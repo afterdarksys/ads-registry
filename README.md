@@ -444,3 +444,5 @@ Built for Dartnode Apps Server and enterprise deployments.
 ---
 
 **The After Dark Systems Container Registry: A registry for Docker and Kubernetes that doesn't suck\!**
+
+By Ryan and the team at After Dark Systems, LLC.
