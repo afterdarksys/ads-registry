@@ -527,7 +527,10 @@ Built with:
 
 ## Support
 
-- **Documentation**: [QUICKSTART.md](QUICKSTART.md)
+- **Documentation**:
+  - [QUICKSTART.md](QUICKSTART.md) - Quick start guide
+  - [docs/LOGGING.md](docs/LOGGING.md) - Enterprise logging setup
+  - [docs/VAULT_SETUP.md](docs/VAULT_SETUP.md) - HashiCorp Vault integration
 - **Issues**: GitHub Issues
 - **Discussions**: GitHub Discussions
 - **Security**: security@yourcompany.com
