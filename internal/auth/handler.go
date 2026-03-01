@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -35,12 +36,28 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 2. Authenticate user with password
-	_, err := h.db.AuthenticateUser(req.Context(), user, pass)
+	dbUser, err := h.db.AuthenticateUser(req.Context(), user, pass)
 	if err != nil {
-		w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		// Bootstrap fallback: Allow admin/admin if no users exist
+		if user == "admin" && pass == "admin" {
+			// Check if ANY users exist in the database
+			if testUser, _ := h.db.GetUserByUsername(req.Context(), "admin"); testUser == nil {
+				// No admin user exists - allow bootstrap login
+				log.Printf("WARNING: Bootstrap login used (admin/admin). Create a real user ASAP!")
+				dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
+			} else {
+				w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
+
+	_ = dbUser // we have the authenticated user
 
 	// 3. Parse Scopes from ?scope=repository:library/ubuntu:pull,push
 	// Docker might request multiple scopes, but standard clients usually just ask for one.
