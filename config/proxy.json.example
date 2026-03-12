@@ -1,0 +1,45 @@
+{
+  "enabled": true,
+  "cache_ttl_hours": 168,
+  "upstreams": [
+    {
+      "name": "dockerhub",
+      "url": "https://registry-1.docker.io",
+      "username": "",
+      "password": "",
+      "mirror": true
+    },
+    {
+      "name": "gcr",
+      "url": "https://gcr.io",
+      "username": "_json_key",
+      "password": "<GCR_SERVICE_ACCOUNT_JSON>",
+      "mirror": false
+    },
+    {
+      "name": "ghcr",
+      "url": "https://ghcr.io",
+      "username": "<GITHUB_USERNAME>",
+      "password": "<GITHUB_PAT>",
+      "mirror": false
+    },
+    {
+      "name": "quay",
+      "url": "https://quay.io",
+      "username": "",
+      "password": "",
+      "mirror": false
+    },
+    {
+      "name": "ecr",
+      "url": "https://<AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com",
+      "username": "AWS",
+      "password": "<ECR_TOKEN>",
+      "mirror": false
+    }
+  ],
+  "remapping": {
+    "library/ubuntu": "proxy/dockerhub/library/ubuntu",
+    "nginx": "proxy/dockerhub/library/nginx"
+  }
+}

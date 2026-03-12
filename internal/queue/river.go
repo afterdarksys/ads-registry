@@ -10,6 +10,7 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/storage"
+	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/webhooks"
 )
 
@@ -21,7 +22,8 @@ type Client struct {
 
 // NewClient creates a new River client from a PostgreSQL connection string
 func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, periodicWorkers int,
-	dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher) (*Client, error) {
+	dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher,
+	upstreamMgr *upstreams.Manager) (*Client, error) {
 	// Create pgxpool connection
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -51,11 +53,20 @@ func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, per
 	}
 
 	// Register workers
-	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd)
+	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd, nil) // TODO: Wire up notification service
 	periodicWorker := NewPeriodicRescanWorker(dbStore, riverClient)
 
 	river.AddWorker(workers, scanWorker)
 	river.AddWorker(workers, periodicWorker)
+
+	// Register upstream token refresh workers (if upstreamMgr provided)
+	if upstreamMgr != nil {
+		tokenRefreshWorker := NewTokenRefreshWorker(upstreamMgr)
+		periodicTokenCheckWorker := NewPeriodicTokenCheckWorker(upstreamMgr, riverClient)
+
+		river.AddWorker(workers, tokenRefreshWorker)
+		river.AddWorker(workers, periodicTokenCheckWorker)
+	}
 
 	return &Client{
 		riverClient: riverClient,

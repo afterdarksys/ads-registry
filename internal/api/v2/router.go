@@ -18,26 +18,35 @@ import (
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/policy"
+	"github.com/ryan/ads-registry/internal/proxy"
 	"github.com/ryan/ads-registry/internal/storage"
+	"github.com/ryan/ads-registry/internal/upstreams"
 )
 
 type Router struct {
-	db       db.Store
-	storage  storage.Provider
-	authMid  *auth.Middleware
-	tokenTs  *auth.TokenService
-	enforcer *policy.Enforcer
-	starlark *automation.Engine
+	db            db.Store
+	storage       storage.Provider
+	authMid       *auth.Middleware
+	tokenTs       *auth.TokenService
+	enforcer      *policy.Enforcer
+	starlark      *automation.Engine
+	upstreamProxy *proxy.UpstreamProxy
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager) *Router {
+	var upstreamProxy *proxy.UpstreamProxy
+	if upstreamMgr != nil {
+		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
+	}
+
 	return &Router{
-		db:       dbStore,
-		storage:  storageProvider,
-		tokenTs:  ts,
-		authMid:  auth.NewMiddleware(ts),
-		enforcer: enf,
-		starlark: star,
+		db:            dbStore,
+		storage:       storageProvider,
+		tokenTs:       ts,
+		authMid:       auth.NewMiddleware(ts),
+		enforcer:      enf,
+		starlark:      star,
+		upstreamProxy: upstreamProxy,
 	}
 }
 
@@ -154,6 +163,22 @@ func (r *Router) getTags(w http.ResponseWriter, req *http.Request) {
 	nStr := req.URL.Query().Get("n")
 	last := req.URL.Query().Get("last")
 
+	// Check if this is an upstream registry request
+	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), ns) {
+		log.Printf("[UPSTREAM PROXY] Proxying tags list request: %s/%s", ns, repo)
+		upstreamResp, err := r.upstreamProxy.ProxyTagsList(req.Context(), ns, repo)
+		if err != nil {
+			log.Printf("[UPSTREAM PROXY] Error: %v", err)
+			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+		if err := proxy.WriteProxyResponse(w, upstreamResp); err != nil {
+			log.Printf("[UPSTREAM PROXY] Error writing response: %v", err)
+		}
+		return
+	}
+
+	// Normal local registry behavior
 	limit := 0
 	if nStr != "" {
 		parsed, err := strconv.Atoi(nStr)
@@ -194,6 +219,22 @@ func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
 	repo := chi.URLParam(req, "repo")
 	ref := chi.URLParam(req, "reference")
 
+	// Check if this is an upstream registry request
+	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), ns) {
+		log.Printf("[UPSTREAM PROXY] Proxying manifest request: %s/%s:%s", ns, repo, ref)
+		upstreamResp, err := r.upstreamProxy.ProxyManifest(req.Context(), ns, repo, ref, req.Method)
+		if err != nil {
+			log.Printf("[UPSTREAM PROXY] Error: %v", err)
+			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+		if err := proxy.WriteProxyResponse(w, upstreamResp); err != nil {
+			log.Printf("[UPSTREAM PROXY] Error writing response: %v", err)
+		}
+		return
+	}
+
+	// Normal local registry behavior
 	mediaType, digest, payload, err := r.db.GetManifest(req.Context(), filepath.Join(ns, repo), ref)
 	if err == db.ErrNotFound {
 		http.Error(w, `{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}`, http.StatusNotFound)
@@ -343,6 +384,22 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 	repo := chi.URLParam(req, "repo")
 	digest := chi.URLParam(req, "digest")
 
+	// Check if this is an upstream registry request
+	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), ns) {
+		log.Printf("[UPSTREAM PROXY] Proxying blob request: %s/%s %s", ns, repo, digest)
+		upstreamResp, err := r.upstreamProxy.ProxyBlob(req.Context(), ns, repo, digest, req.Method)
+		if err != nil {
+			log.Printf("[UPSTREAM PROXY] Error: %v", err)
+			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+		if err := proxy.WriteProxyResponse(w, upstreamResp); err != nil {
+			log.Printf("[UPSTREAM PROXY] Error writing response: %v", err)
+		}
+		return
+	}
+
+	// Normal local registry behavior
 	size, err := r.db.GetBlobSize(req.Context(), digest)
 	if err == db.ErrNotFound {
 		http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown"}]}`, http.StatusNotFound)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/ryan/ads-registry/internal/config"
@@ -110,6 +111,26 @@ func (s *PostgresStore) migrate() error {
 		namespace_id INTEGER PRIMARY KEY REFERENCES namespaces(id),
 		limit_bytes BIGINT NOT NULL,
 		used_bytes BIGINT NOT NULL DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS upstream_registries (
+		id SERIAL PRIMARY KEY,
+		name TEXT UNIQUE NOT NULL,
+		type TEXT NOT NULL,
+		endpoint TEXT NOT NULL,
+		region TEXT NOT NULL,
+		access_key_id TEXT NOT NULL,
+		secret_access_key TEXT NOT NULL,
+		current_token TEXT,
+		token_expiry TIMESTAMP WITH TIME ZONE,
+		last_refresh TIMESTAMP WITH TIME ZONE,
+		refresh_fail_count INTEGER DEFAULT 0,
+		enabled BOOLEAN DEFAULT TRUE,
+		cache_enabled BOOLEAN DEFAULT TRUE,
+		cache_ttl INTEGER DEFAULT 3600,
+		pull_only BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
 
 	-- Performance indexes
@@ -561,6 +582,134 @@ func (s *PostgresStore) UpdateQuotaUsage(ctx context.Context, namespace string, 
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE quotas SET used_bytes = used_bytes + $1 WHERE namespace_id = $2
 	`, sizeDelta, nsID)
+	return err
+}
+
+// --------------------------------------------------------------------------------
+// Upstream Registries
+// --------------------------------------------------------------------------------
+
+func (s *PostgresStore) CreateUpstream(ctx context.Context, name, upstreamType, endpoint, region, accessKeyID, secretAccessKey string, enabled, cacheEnabled, pullOnly bool, cacheTTL int) (int, error) {
+	var id int
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO upstream_registries
+		(name, type, endpoint, region, access_key_id, secret_access_key, enabled, cache_enabled, cache_ttl, pull_only)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`, name, upstreamType, endpoint, region, accessKeyID, secretAccessKey, enabled, cacheEnabled, cacheTTL, pullOnly).Scan(&id)
+	return id, err
+}
+
+func (s *PostgresStore) GetUpstream(ctx context.Context, id int) (map[string]interface{}, error) {
+	var upstream map[string]interface{}
+	var name, upstreamType, endpoint, region, accessKeyID, secretAccessKey string
+	var currentToken sql.NullString
+	var tokenExpiry, lastRefresh sql.NullTime
+	var refreshFailCount int
+	var enabled, cacheEnabled, pullOnly bool
+	var cacheTTL int
+	var createdAt, updatedAt time.Time
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, type, endpoint, region, access_key_id, secret_access_key,
+		       current_token, token_expiry, last_refresh, refresh_fail_count,
+		       enabled, cache_enabled, cache_ttl, pull_only, created_at, updated_at
+		FROM upstream_registries WHERE id = $1
+	`, id).Scan(&id, &name, &upstreamType, &endpoint, &region, &accessKeyID, &secretAccessKey,
+		&currentToken, &tokenExpiry, &lastRefresh, &refreshFailCount,
+		&enabled, &cacheEnabled, &cacheTTL, &pullOnly, &createdAt, &updatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	upstream = map[string]interface{}{
+		"id":                 id,
+		"name":               name,
+		"type":               upstreamType,
+		"endpoint":           endpoint,
+		"region":             region,
+		"access_key_id":      accessKeyID,
+		"secret_access_key":  secretAccessKey,
+		"current_token":      currentToken.String,
+		"token_expiry":       tokenExpiry.Time,
+		"last_refresh":       lastRefresh.Time,
+		"refresh_fail_count": refreshFailCount,
+		"enabled":            enabled,
+		"cache_enabled":      cacheEnabled,
+		"cache_ttl":          cacheTTL,
+		"pull_only":          pullOnly,
+		"created_at":         createdAt,
+		"updated_at":         updatedAt,
+	}
+
+	return upstream, nil
+}
+
+func (s *PostgresStore) GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error) {
+	var id int
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM upstream_registries WHERE name = $1", name).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetUpstream(ctx, id)
+}
+
+func (s *PostgresStore) ListUpstreams(ctx context.Context) ([]map[string]interface{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, type, endpoint, region, enabled, cache_enabled, pull_only, last_refresh
+		FROM upstream_registries
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var upstreams []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var name, upstreamType, endpoint, region string
+		var enabled, cacheEnabled, pullOnly bool
+		var lastRefresh sql.NullTime
+
+		if err := rows.Scan(&id, &name, &upstreamType, &endpoint, &region, &enabled, &cacheEnabled, &pullOnly, &lastRefresh); err != nil {
+			return nil, err
+		}
+
+		upstream := map[string]interface{}{
+			"id":            id,
+			"name":          name,
+			"type":          upstreamType,
+			"endpoint":      endpoint,
+			"region":        region,
+			"enabled":       enabled,
+			"cache_enabled": cacheEnabled,
+			"pull_only":     pullOnly,
+			"last_refresh":  lastRefresh.Time,
+		}
+		upstreams = append(upstreams, upstream)
+	}
+	return upstreams, rows.Err()
+}
+
+func (s *PostgresStore) UpdateUpstreamToken(ctx context.Context, id int, token string, expiry time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE upstream_registries
+		SET current_token = $1, token_expiry = $2, last_refresh = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $3
+	`, token, expiry, id)
+	return err
+}
+
+func (s *PostgresStore) DeleteUpstream(ctx context.Context, id int) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM upstream_registries WHERE id = $1", id)
 	return err
 }
 

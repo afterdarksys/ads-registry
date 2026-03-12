@@ -36,6 +36,7 @@ import (
 	"github.com/ryan/ads-registry/internal/storage/local"
 	"github.com/ryan/ads-registry/internal/storage/oci"
 	"github.com/ryan/ads-registry/internal/storage/s3"
+	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/vault"
 	"github.com/ryan/ads-registry/internal/webhooks"
 	"github.com/spf13/cobra"
@@ -280,7 +281,24 @@ func runServer() {
 	}
 	logger.Info(fmt.Sprintf("Initialized Storage: %s", cfg.Storage.Driver))
 
-	// 3. Router
+	// 3. Initialize Upstream Registry Manager
+	// This manages cloud provider credentials and token refresh for AWS ECR, Oracle OCI, Docker Hub, GCP
+	var upstreamManager *upstreams.Manager
+	switch cfg.Database.Driver {
+	case "postgres", "pgsqllite":
+		// Cast to concrete postgres.PostgresStore type which implements DBStore
+		if pgStore, ok := store.(*postgres.PostgresStore); ok {
+			upstreamStore := upstreams.NewStoreAdapter(pgStore)
+			upstreamManager = upstreams.NewManager(upstreamStore)
+			logger.Info("Upstream registry manager initialized (AWS ECR, Oracle OCI, Docker Hub, GCP)")
+		}
+	case "sqlite3":
+		// SQLite doesn't support upstream registries yet - they require PostgreSQL
+		logger.Warning("Upstream registries require PostgreSQL - upstream features disabled with SQLite")
+	}
+
+
+	// 4. Router
 	r := chi.NewRouter()
 
 	// Initialize compatibility middleware
@@ -307,9 +325,14 @@ func runServer() {
 	r.Use(httprate.LimitByIP(100, 1*time.Minute))
 
 	// Management & Observability
+	healthHandler := health.NewHandler("1.0.0")
+	// Register health checks
+	healthHandler.RegisterLiveness("uptime", health.UptimeChecker(time.Now()))
+	// TODO: Add database and storage checkers for readiness
+
 	r.Handle("/metrics", promhttp.Handler())
-	r.Get("/health/live", health.LivenessHandler())
-	r.Get("/health/ready", health.ReadinessHandler(store, storageProvider))
+	r.Get("/health/live", healthHandler.Liveness)
+	r.Get("/health/ready", healthHandler.Readiness)
 
 	// Native OCI Dist API
 
@@ -318,6 +341,7 @@ func runServer() {
 	wd := webhooks.NewDispatcher(cfg.Webhooks)
 	engines := []scanner.Engine{
 		trivy.New("/tmp/trivy-cache"),
+		scanner.NewStaticAnalyzer(storageProvider), // Static analysis with Semgrep
 	}
 
 	// Choose scanner implementation based on database driver and queue configuration
@@ -353,6 +377,7 @@ func runServer() {
 			storageProvider,
 			queueEngines,
 			wd,
+			upstreamManager,
 		)
 		if err != nil {
 			logger.Error("Failed to initialize River queue", err)
@@ -392,7 +417,7 @@ func runServer() {
 	// 4. Starlark Embedded Automation
 	starEng := automation.NewEngine()
 
-	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng) // passing enf for policy control, starEng for automation
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy
 	v2api.Register(r)
 
 	// Admin Dashboard Management API

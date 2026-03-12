@@ -53,19 +53,27 @@ func (ScanJobArgs) Kind() string {
 // ScanJobWorker processes vulnerability scan jobs
 type ScanJobWorker struct {
 	river.WorkerDefaults[ScanJobArgs]
-	db       db.Store
-	storage  storage.Provider
-	engines  []ScanEngine
-	webhookD *webhooks.Dispatcher
+	db              db.Store
+	storage         storage.Provider
+	engines         []ScanEngine
+	webhookD        *webhooks.Dispatcher
+	notificationSvc NotificationService
+}
+
+// NotificationService interface to avoid import cycles
+type NotificationService interface {
+	NotifyOwnerOfScanResults(ctx context.Context, digest string, report *ScanReport) error
+	SaveScanResultsToDatabase(ctx context.Context, manifestID int, report *ScanReport) error
 }
 
 // NewScanJobWorker creates a new vulnerability scan worker
-func NewScanJobWorker(dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher) *ScanJobWorker {
+func NewScanJobWorker(dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher, notifSvc NotificationService) *ScanJobWorker {
 	return &ScanJobWorker{
-		db:       dbStore,
-		storage:  sp,
-		engines:  engines,
-		webhookD: wd,
+		db:              dbStore,
+		storage:         sp,
+		engines:         engines,
+		webhookD:        wd,
+		notificationSvc: notifSvc,
 	}
 }
 
@@ -92,7 +100,7 @@ func (w *ScanJobWorker) Work(ctx context.Context, job *river.Job[ScanJobArgs]) e
 			continue
 		}
 
-		// 3. Save report to DB
+		// 3. Save report to DB (legacy table)
 		data, _ := json.Marshal(report)
 		log.Printf("[River] Saved vulnerability report for %s: %s", args.Digest, string(data))
 
@@ -100,6 +108,17 @@ func (w *ScanJobWorker) Work(ctx context.Context, job *river.Job[ScanJobArgs]) e
 		if err != nil {
 			log.Printf("[River] Failed to save vulnerability report to DB for %s: %v", args.Digest, err)
 			return err
+		}
+
+		// 4. Send notifications to image owner (if notification service is configured)
+		if w.notificationSvc != nil {
+			// TODO: Need to add GetManifestID method to db.Store interface
+			// For now, just send notifications using digest
+			if err := w.notificationSvc.NotifyOwnerOfScanResults(ctx, args.Digest, report); err != nil {
+				log.Printf("[River] Failed to send notifications: %v", err)
+			} else {
+				log.Printf("[River] Sent scan notifications for %s", args.Digest)
+			}
 		}
 	}
 
