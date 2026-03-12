@@ -1,20 +1,25 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
+import Users from './pages/Users';
+import Repositories from './pages/Repositories';
+import Policies from './pages/Policies';
+import Scripts from './pages/Scripts';
+import Settings from './pages/Settings';
 
-function App() {
+export default function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
-          <Route path="policies" element={<div className="glass-card"><h1>Policies</h1><p>CEL Admission policies and Starlark routines.</p></div>} />
-          <Route path="activity" element={<div className="glass-card"><h1>Activity</h1><p>Registry audit logs.</p></div>} />
-          <Route path="settings" element={<div className="glass-card"><h1>Settings</h1><p>Global registry configuration.</p></div>} />
+          <Route path="users" element={<Users />} />
+          <Route path="repositories" element={<Repositories />} />
+          <Route path="policies" element={<Policies />} />
+          <Route path="scripts" element={<Scripts />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </BrowserRouter>
   );
 }
-
-export default App;

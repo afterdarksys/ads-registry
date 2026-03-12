@@ -1,0 +1,14 @@
+{
+  "compatibility": {
+    "enabled": true,
+    "docker_client_workarounds": {
+      "enable_docker_29_manifest_fix": true,
+      "force_http1_for_manifests": true,
+      "extra_flushes": 3
+    },
+    "observability": {
+      "log_workarounds": true,
+      "enable_metrics": true
+    }
+  }
+}

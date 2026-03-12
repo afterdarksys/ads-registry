@@ -1,0 +1,12 @@
+---
+# Handlers for ADS Container Registry
+
+- name: restart ads-registry
+  systemd:
+    name: "{{ registry_service_name }}"
+    state: restarted
+    daemon_reload: yes
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes

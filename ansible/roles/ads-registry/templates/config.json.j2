@@ -1,0 +1,75 @@
+{
+  "server": {
+    "address": "0.0.0.0",
+    "port": {{ registry_http_port }},
+    "read_timeout": 300000000000,
+    "write_timeout": 300000000000,
+    "idle_timeout": 120000000000,
+    "read_header_timeout": 10000000000,
+    "tls": {
+      "enabled": {{ registry_tls_enabled | lower }},
+      "port": {{ registry_https_port }},
+      "cert_file": "{{ registry_tls_cert }}",
+      "key_file": "{{ registry_tls_key }}"
+    }
+  },
+  "database": {
+    "driver": "postgres",
+    "dsn": "postgres://{{ registry_db_user }}:{{ registry_db_password | default('ads_registry_password') }}@{{ registry_db_host }}:{{ registry_db_port }}/{{ registry_db_name }}?sslmode=disable",
+    "max_open_conns": 25,
+    "max_idle_conns": 5,
+    "conn_max_lifetime": 3600000000000
+  },
+  "storage": {
+    "driver": "local",
+    "local": {
+      "root_directory": "{{ registry_data_dir }}/blobs"
+    }
+  },
+  "auth": {
+    "token_issuer": "ads-registry",
+    "token_service": "registry",
+    "private_key_path": "",
+    "public_key_path": ""
+  },
+  "logging": {
+    "syslog": {
+      "enabled": false,
+      "server": "local",
+      "tag": "ads-registry",
+      "priority": "INFO"
+    },
+    "elasticsearch": {
+      "enabled": false,
+      "endpoint": "http://localhost:9200",
+      "index": "ads-registry",
+      "username": "",
+      "password": ""
+    }
+  },
+  "vault": {
+    "enabled": false,
+    "address": "http://localhost:8200",
+    "token": "",
+    "mount_path": "secret",
+    "key_path": "ads-registry/jwt-keys"
+  },
+  "queue": {
+    "enabled": true,
+    "vulnerability_queue": 4,
+    "periodic_queue": 1,
+    "default_queue": 2
+  },
+  "redis": {
+    "enabled": {{ registry_redis_enabled | lower }},
+    "address": "{{ registry_redis_host }}:{{ registry_redis_port }}",
+    "password": "{{ registry_redis_password | default('') }}",
+    "db": 0,
+    "ttl": {
+      "manifest": 300,
+      "signature": 300,
+      "scan_report": 3600,
+      "policy": 300
+    }
+  }
+}

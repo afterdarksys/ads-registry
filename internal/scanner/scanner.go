@@ -16,6 +16,11 @@ type Engine interface {
 	Scan(ctx context.Context, namespace, repo, digest string) (*Report, error)
 }
 
+// Scanner interface for job enqueuing (implemented by both Worker and RiverWorker)
+type Scanner interface {
+	Enqueue(namespace, repo, ref, digest string)
+}
+
 // Report represents a standardized vulnerability output
 type Report struct {
 	Digest          string    `json:"digest"`

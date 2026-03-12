@@ -1,0 +1,56 @@
+{
+  "_description": "Example configuration for corporate environments with MITM proxies and complex CA hierarchies",
+  "_security_warning": "This configuration reduces TLS security for compatibility. Review docs/TLS-NUCLEAR-OPTIONS.md",
+  "_approval_required": "DO NOT USE without security team approval and documented justification",
+
+  "compatibility": {
+    "enabled": true,
+
+    "docker_client_workarounds": {
+      "enable_docker_29_manifest_fix": true,
+      "force_http1_for_manifests": true,
+      "disable_chunked_encoding": false,
+      "max_manifest_size": 10485760,
+      "extra_flushes": 3,
+      "header_write_delay_ms": 0
+    },
+
+    "tls_compatibility": {
+      "_scenario": "Corporate MITM proxy with 3-4 level CA hierarchy",
+      "_justification": "Acme Corp BlueCoat proxy intercepts TLS and uses custom 4-level CA chain (ticket #12345)",
+      "_approval": "Security team approved 2026-03-11, review quarterly",
+      "_removal_target": "Q3 2026 when proxy infrastructure upgraded",
+
+      "min_tls_version": "1.2",
+      "enable_legacy_ciphers": false,
+      "http2_enabled": true,
+
+      "_nuclear_options_enabled": true,
+      "enable_certificate_path_validation": true,
+      "certificate_path_validation_depth": 2,
+      "allow_incomplete_chains": true,
+      "accept_self_signed_from_clients": [],
+
+      "_explanation_depth": "Depth 2 = validates leaf cert + 2 intermediates, stops before root",
+      "_explanation_incomplete": "Proxy doesn't send full chain, registry builds from cache"
+    },
+
+    "header_workarounds": {
+      "always_send_distribution_api_version": true,
+      "content_type_fixups": true,
+      "location_header_format": "absolute",
+      "enable_cors": false,
+      "accept_malformed_accept": true,
+      "normalize_digest_header": true
+    },
+
+    "observability": {
+      "log_workarounds": true,
+      "log_client_detection": true,
+      "enable_metrics": true,
+      "metrics_prefix": "ads_registry_compat_",
+      "log_sample_rate": 1.0,
+      "log_success_only": false
+    }
+  }
+}

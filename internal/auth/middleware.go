@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -54,8 +55,22 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 		ns := chi.URLParam(r, "namespace")
 		fullRepo := ns + "/" + repo
 
+		log.Printf("[MIDDLEWARE] Checking authorization: URL=%s ns=%s repo=%s fullRepo=%s action=%s", r.URL.Path, ns, repo, fullRepo, action)
+
 		authorized := false
 		for _, access := range claims.Access {
+			log.Printf("[MIDDLEWARE] JWT Access: type=%s name=%s actions=%v", access.Type, access.Name, access.Actions)
+			
+			// Allow catalog access
+			if r.URL.Path == "/v2/_catalog" && access.Type == "registry" && access.Name == "catalog" {
+				for _, allowedAction := range access.Actions {
+					if allowedAction == "*" {
+						authorized = true
+						break
+					}
+				}
+			}
+
 			if access.Type == "repository" && access.Name == fullRepo {
 				for _, allowedAction := range access.Actions {
 					if allowedAction == action || allowedAction == "*" {
@@ -64,6 +79,10 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 					}
 				}
 			}
+		}
+
+		if !authorized {
+			log.Printf("[MIDDLEWARE] Authorization DENIED: fullRepo=%s from JWT != expected or action %s not in token", fullRepo, action)
 		}
 
 		// For the base check `/v2/` we only need a valid token.

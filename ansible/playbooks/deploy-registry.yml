@@ -1,0 +1,21 @@
+---
+- name: Deploy ADS Container Registry
+  hosts: registry_servers
+  gather_facts: yes
+  become: yes
+
+  vars:
+    build_binary: yes
+    restart_service: yes
+
+  tasks:
+    - name: Import registry deployment role
+      import_role:
+        name: ads-registry
+
+  handlers:
+    - name: restart ads-registry
+      systemd:
+        name: "{{ registry_service_name }}"
+        state: restarted
+        daemon_reload: yes

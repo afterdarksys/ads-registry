@@ -107,6 +107,23 @@ func (s *SQLiteStore) migrate() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS groups (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT UNIQUE NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS user_groups (
+		user_id INTEGER NOT NULL REFERENCES users(id),
+		group_id INTEGER NOT NULL REFERENCES groups(id),
+		PRIMARY KEY (user_id, group_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS quotas (
+		namespace_id INTEGER PRIMARY KEY REFERENCES namespaces(id),
+		limit_bytes BIGINT NOT NULL,
+		used_bytes BIGINT NOT NULL DEFAULT 0
+	);
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -147,6 +164,89 @@ func (s *SQLiteStore) CreateRepository(ctx context.Context, namespace, name stri
 
 	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO repositories (namespace_id, name) VALUES (?, ?)", nsID, name)
 	return err
+}
+
+func (s *SQLiteStore) ListRepositories(ctx context.Context, limit int, last string) ([]string, error) {
+	lastNs, lastRepo := "", ""
+	if last != "" {
+		lastNs, lastRepo = parseRepoPath(last)
+	}
+
+	query := `
+		SELECT n.name, r.name
+		FROM repositories r
+		JOIN namespaces n ON r.namespace_id = n.id
+	`
+	var args []interface{}
+	if last != "" {
+		query += " WHERE n.name > ? OR (n.name = ? AND r.name > ?)"
+		args = append(args, lastNs, lastNs, lastRepo)
+	}
+	query += " ORDER BY n.name, r.name"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []string
+	for rows.Next() {
+		var ns, name string
+		if err := rows.Scan(&ns, &name); err != nil {
+			return nil, err
+		}
+		if ns == "library" {
+			repos = append(repos, name)
+		} else {
+			repos = append(repos, ns+"/"+name)
+		}
+	}
+	return repos, rows.Err()
+}
+
+func (s *SQLiteStore) ListTags(ctx context.Context, repo string, limit int, last string) ([]string, error) {
+	ns, repoName := parseRepoPath(repo)
+
+	query := `
+		SELECT m.reference
+		FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = ? AND r.name = ? 
+		AND m.reference NOT LIKE 'sha256:%'
+	`
+	args := []interface{}{ns, repoName}
+
+	if last != "" {
+		query += " AND m.reference > ?"
+		args = append(args, last)
+	}
+	query += " ORDER BY m.reference"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
 }
 
 func (s *SQLiteStore) PutManifest(ctx context.Context, repo, reference string, mediaType string, digest string, payload []byte) error {
@@ -279,6 +379,26 @@ func (s *SQLiteStore) GetUserByUsername(ctx context.Context, username string) (*
 	return &u, nil
 }
 
+func (s *SQLiteStore) ListUsers(ctx context.Context) ([]db.User, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []db.User
+	for rows.Next() {
+		var u db.User
+		var scopes string
+		if err := rows.Scan(&u.ID, &u.Username, &scopes); err != nil {
+			return nil, err
+		}
+		u.Scopes = []string{scopes}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 func (s *SQLiteStore) AuthenticateUser(ctx context.Context, username, password string) (*db.User, error) {
 	user, err := s.GetUserByUsername(ctx, username)
 	if err != nil {
@@ -332,6 +452,136 @@ func HashPassword(password string) (string, error) {
 func verifyPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
+
+// --------------------------------------------------------------------------------
+// Quotas & Groups
+// --------------------------------------------------------------------------------
+
+func (s *SQLiteStore) CreateGroup(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO groups (name) VALUES (?)", name)
+	return err
+}
+
+func (s *SQLiteStore) ListGroups(ctx context.Context) ([]db.Group, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []db.Group
+	for rows.Next() {
+		var g db.Group
+		if err := rows.Scan(&g.ID, &g.Name); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+func (s *SQLiteStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
+		FROM quotas q
+		JOIN namespaces n ON q.namespace_id = n.id
+		ORDER BY n.name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var quotas []db.Quota
+	for rows.Next() {
+		var q db.Quota
+		if err := rows.Scan(&q.NamespaceID, &q.Namespace, &q.LimitBytes, &q.UsedBytes); err != nil {
+			return nil, err
+		}
+		quotas = append(quotas, q)
+	}
+	return quotas, rows.Err()
+}
+
+func (s *SQLiteStore) AddUserToGroup(ctx context.Context, username, groupName string) error {
+	var userID, groupID int
+
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM users WHERE username = ?", username).Scan(&userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return db.ErrNotFound
+		}
+		return err
+	}
+
+	err = s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE name = ?", groupName).Scan(&groupID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return db.ErrNotFound
+		}
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, groupID)
+	return err
+}
+
+func (s *SQLiteStore) CheckQuota(ctx context.Context, namespace string) (*db.Quota, error) {
+	var q db.Quota
+	err := s.db.QueryRowContext(ctx, `
+		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
+		FROM quotas q
+		JOIN namespaces n ON q.namespace_id = n.id
+		WHERE n.name = ?
+	`, namespace).Scan(&q.NamespaceID, &q.Namespace, &q.LimitBytes, &q.UsedBytes)
+	
+	if err == sql.ErrNoRows {
+		// No quota set for this namespace, treat as unlimited
+		return nil, nil
+	}
+	return &q, err
+}
+
+func (s *SQLiteStore) SetQuota(ctx context.Context, namespace string, limitBytes int64) error {
+	err := s.CreateNamespace(ctx, namespace)
+	if err != nil {
+		return err
+	}
+
+	var nsID int
+	err = s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO quotas (namespace_id, limit_bytes, used_bytes) 
+		VALUES (?, ?, 0)
+		ON CONFLICT(namespace_id) DO UPDATE SET limit_bytes=excluded.limit_bytes
+	`, nsID, limitBytes)
+	return err
+}
+
+func (s *SQLiteStore) UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error {
+	var nsID int
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// If namespace doesn't exist yet, there's no quota tracked for it
+			return nil
+		}
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE quotas SET used_bytes = used_bytes + ? WHERE namespace_id = ?
+	`, sizeDelta, nsID)
+	return err
+}
+
+// --------------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------------
 
 // parseRepoPath splits a repository path into namespace and repository name
 // Examples:

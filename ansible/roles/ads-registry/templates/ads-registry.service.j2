@@ -1,0 +1,30 @@
+[Unit]
+Description=ADS Container Registry
+Documentation=https://github.com/afterdarksys/ads-registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory={{ registry_install_dir }}
+ExecStart={{ registry_install_dir }}/ads-registry serve
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ registry_data_dir }}
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

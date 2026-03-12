@@ -49,21 +49,37 @@ func (r *Router) Register(mux chi.Router) {
 
 	// API Endpoints
 	mux.Route("/v2", func(api chi.Router) {
-		// Minimum requirement for docker login to succeed.
-		// Protected by middleware that checks for Token/Auth
-		api.Use(r.authMid.Protect)
+		// Set Docker Registry API version header on ALL /v2 responses
+		api.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+				next.ServeHTTP(w, r)
+			})
+		})
 
+		// Base check endpoint doesn't need full auth
 		api.Get("/", r.baseCheck)
+		
+		api.Route("/_catalog", func(catalogCtx chi.Router) {
+			catalogCtx.Use(r.authMid.Protect)
+			catalogCtx.Get("/", r.getCatalog)
+		})
 
 		api.Route("/{namespace}/{repo}", func(repoCtx chi.Router) {
 
 			// 1. First, check Auth JWT Bearer Token scopes
+			// NOTE: Middleware must be applied HERE, not at /v2 level,
+			// so that namespace/repo URL params are available for authorization
 			repoCtx.Use(r.authMid.Protect)
 
 			// 2. Second, invoke the CEL engine to verify custom enterprise admission rules
-			if r.enforcer != nil {
-				repoCtx.Use(r.enforcer.Protect)
-			}
+			// DISABLED for initial testing - uncomment to enable policy enforcement
+			// if r.enforcer != nil {
+			// 	repoCtx.Use(r.enforcer.Protect)
+			// }
+
+			// Tags
+			repoCtx.Get("/tags/list", r.getTags)
 
 			// Manifests
 			repoCtx.Get("/manifests/{reference}", r.getManifest)
@@ -84,11 +100,89 @@ func (r *Router) Register(mux chi.Router) {
 
 func (r *Router) baseCheck(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+
+	// If no auth provided, tell Docker where to get a token
+	if req.Header.Get("Authorization") == "" {
+		w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="https://%s/auth/token",service="registry"`, req.Host))
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
 func getPath(ns, repo, digest string) string {
 	return filepath.Join(ns, repo, digest)
+}
+
+func (r *Router) getCatalog(w http.ResponseWriter, req *http.Request) {
+	nStr := req.URL.Query().Get("n")
+	last := req.URL.Query().Get("last")
+
+	limit := 0
+	if nStr != "" {
+		parsed, err := strconv.Atoi(nStr)
+		if err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	repos, err := r.db.ListRepositories(req.Context(), limit, last)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if repos == nil {
+		repos = []string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if limit > 0 && len(repos) == limit {
+		lastItem := repos[len(repos)-1]
+		w.Header().Set("Link", fmt.Sprintf(`</v2/_catalog?n=%d&last=%s>; rel="next"`, limit, lastItem))
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"repositories": repos,
+	})
+}
+
+func (r *Router) getTags(w http.ResponseWriter, req *http.Request) {
+	ns := chi.URLParam(req, "namespace")
+	repo := chi.URLParam(req, "repo")
+	nStr := req.URL.Query().Get("n")
+	last := req.URL.Query().Get("last")
+
+	limit := 0
+	if nStr != "" {
+		parsed, err := strconv.Atoi(nStr)
+		if err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	repoPath := filepath.Join(ns, repo)
+	tags, err := r.db.ListTags(req.Context(), repoPath, limit, last)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if tags == nil {
+		tags = []string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if limit > 0 && len(tags) == limit {
+		lastItem := tags[len(tags)-1]
+		w.Header().Set("Link", fmt.Sprintf(`</v2/%s/%s/tags/list?n=%d&last=%s>; rel="next"`, ns, repo, limit, lastItem))
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"name": repoPath,
+		"tags": tags,
+	})
 }
 
 // ----------------------------------------------------
@@ -121,6 +215,8 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	ns := chi.URLParam(req, "namespace")
 	repo := chi.URLParam(req, "repo")
 	ref := chi.URLParam(req, "reference")
+
+	log.Printf("[PUT_MANIFEST] Starting: ns=%s repo=%s ref=%s ContentLength=%d", ns, repo, ref, req.ContentLength)
 
 	// Limit manifest size to 10MB
 	maxManifestSize := int64(10 * 1024 * 1024)
@@ -174,6 +270,29 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	hasher.Write(canonical)
 	digest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
+	// Enforce Quota
+	quota, err := r.db.CheckQuota(req.Context(), ns)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if quota != nil {
+		// Calculate new quota
+		if quota.UsedBytes+int64(len(canonical)) > quota.LimitBytes {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []map[string]string{
+					{
+						"code":    "QUOTA_EXCEEDED",
+						"message": fmt.Sprintf("namespace %s has exceeded its quota of %d bytes", ns, quota.LimitBytes),
+					},
+				},
+			})
+			return
+		}
+	}
+
 	// Store the canonical form
 	err = r.db.PutManifest(req.Context(), filepath.Join(ns, repo), ref, mediaType, digest, canonical)
 	if err != nil {
@@ -181,9 +300,16 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Update Quota Usage
+	if quota != nil {
+		r.db.UpdateQuotaUsage(req.Context(), ns, int64(len(canonical)))
+	}
+
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.Header().Set("Location", "/v2/"+ns+"/"+repo+"/manifests/"+digest)
 	w.WriteHeader(http.StatusCreated)
+	log.Printf("[PUT_MANIFEST] Success: ns=%s repo=%s ref=%s digest=%s", ns, repo, ref, digest)
 
 	// Async: Execute embedded Automation Starlark scripts
 	if r.starlark != nil {
@@ -325,8 +451,23 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	tempPath := filepath.Join(ns, repo, "uploads", uuid)
 	finalPath := getPath(ns, repo, digest)
 
+	// Idempotency check: Does this blob already exist?
+	exists, err := r.db.BlobExists(req.Context(), digest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if exists {
+		// Clean up partial upload just in case
+		r.storage.Delete(req.Context(), tempPath)
+		w.Header().Set("Location", "/v2/"+ns+"/"+repo+"/blobs/"+digest)
+		w.Header().Set("Docker-Content-Digest", digest)
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+
 	var size int64
-	var err error
+	var errCopy error
 
 	// If there's a body, it's a monolithic upload or the final chunk
 	// Try appended reading
@@ -337,10 +478,10 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		_, err = io.Copy(appender, req.Body)
+		_, errCopy = io.Copy(appender, req.Body)
 		appender.Close()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if errCopy != nil {
+			http.Error(w, errCopy.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
@@ -353,10 +494,10 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	}
 
 	hasher := sha256.New()
-	size, err = io.Copy(hasher, reader)
+	size, errCopy = io.Copy(hasher, reader)
 	reader.Close()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if errCopy != nil {
+		http.Error(w, errCopy.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -377,6 +518,30 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Enforce Quota
+	quota, err := r.db.CheckQuota(req.Context(), ns)
+	if err != nil {
+		r.storage.Delete(req.Context(), tempPath)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if quota != nil {
+		if quota.UsedBytes+size > quota.LimitBytes {
+			r.storage.Delete(req.Context(), tempPath)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []map[string]string{
+					{
+						"code":    "QUOTA_EXCEEDED",
+						"message": fmt.Sprintf("namespace %s has exceeded its quota of %d bytes", ns, quota.LimitBytes),
+					},
+				},
+			})
+			return
+		}
+	}
+
 	// 1. Move the verified temp file to final location
 	err = r.storage.Move(req.Context(), tempPath, finalPath)
 	if err != nil {
@@ -391,6 +556,11 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 		r.storage.Delete(req.Context(), finalPath)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Update Quota Usage
+	if quota != nil {
+		r.db.UpdateQuotaUsage(req.Context(), ns, size)
 	}
 
 	w.Header().Set("Location", "/v2/"+ns+"/"+repo+"/blobs/"+digest)

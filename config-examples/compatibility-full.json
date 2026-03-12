@@ -1,0 +1,156 @@
+{
+  "server": {
+    "address": "0.0.0.0",
+    "port": 5005,
+    "read_timeout": 10000000000,
+    "write_timeout": 10000000000,
+    "idle_timeout": 60000000000,
+    "read_header_timeout": 5000000000,
+    "tls": {
+      "enabled": false,
+      "port": 5006,
+      "cert_file": "certs/server.crt",
+      "key_file": "certs/server.key"
+    }
+  },
+  "database": {
+    "driver": "postgres",
+    "dsn": "postgresql://registry:password@localhost:5432/ads_registry?sslmode=disable",
+    "max_open_conns": 100,
+    "max_idle_conns": 10,
+    "conn_max_lifetime": 3600000000000
+  },
+  "storage": {
+    "driver": "s3",
+    "s3": {
+      "region": "us-east-1",
+      "bucket": "ads-registry-prod",
+      "access_key_id": "YOUR_ACCESS_KEY",
+      "secret_access_key": "YOUR_SECRET_KEY"
+    }
+  },
+  "auth": {
+    "token_issuer": "ads-registry",
+    "token_service": "registry",
+    "private_key_path": "keys/private.pem",
+    "public_key_path": "keys/public.pem"
+  },
+  "logging": {
+    "syslog": {
+      "enabled": false,
+      "server": "local",
+      "tag": "ads-registry",
+      "priority": "INFO"
+    },
+    "elasticsearch": {
+      "enabled": false,
+      "endpoint": "http://localhost:9200",
+      "index": "ads-registry",
+      "username": "",
+      "password": ""
+    }
+  },
+  "vault": {
+    "enabled": false,
+    "address": "http://localhost:8200",
+    "token": "",
+    "mount_path": "secret",
+    "key_path": "registry/jwt"
+  },
+  "webhooks": [
+    "http://localhost:8080/webhooks"
+  ],
+  "queue": {
+    "enabled": true,
+    "vulnerability_queue": 4,
+    "periodic_queue": 1,
+    "default_queue": 2
+  },
+  "redis": {
+    "enabled": false,
+    "address": "localhost:6379",
+    "password": "",
+    "db": 0,
+    "ttl": {
+      "manifest": 300,
+      "signature": 300,
+      "scan_report": 3600,
+      "policy": 300
+    }
+  },
+  "compatibility": {
+    "enabled": true,
+    "docker_client_workarounds": {
+      "enable_docker_29_manifest_fix": true,
+      "force_http1_for_manifests": true,
+      "disable_chunked_encoding": false,
+      "max_manifest_size": 10485760,
+      "extra_flushes": 3,
+      "header_write_delay_ms": 0
+    },
+    "protocol_emulation": {
+      "emulate_docker_registry_v2": true,
+      "emulate_distribution_v3": false,
+      "expose_oci_features": true,
+      "strict_mode": false
+    },
+    "broken_client_hacks": {
+      "podman_digest_workaround": true,
+      "skopeo_layer_reuse": true,
+      "crane_manifest_format": "auto",
+      "containerd_content_length": true,
+      "buildkit_parallel_upload": false,
+      "nerdctl_missing_headers": true
+    },
+    "tls_compatibility": {
+      "min_tls_version": "1.2",
+      "enable_legacy_ciphers": false,
+      "http2_enabled": true,
+      "force_http1_for_clients": [
+        "Docker/29\\..*"
+      ],
+      "alpn_protocols": [
+        "h2",
+        "http/1.1"
+      ],
+      "_comment_nuclear_options": "SECURITY WARNING: These are 'ugly but necessary' options for broken TLS. See docs/TLS-NUCLEAR-OPTIONS.md",
+      "enable_certificate_path_validation": false,
+      "certificate_path_validation_depth": -1,
+      "allow_incomplete_chains": false,
+      "accept_self_signed_from_clients": []
+    },
+    "header_workarounds": {
+      "always_send_distribution_api_version": true,
+      "content_type_fixups": true,
+      "location_header_format": "absolute",
+      "enable_cors": false,
+      "accept_malformed_accept": true,
+      "normalize_digest_header": true
+    },
+    "rate_limit_exceptions": {
+      "trusted_registries": [
+        "gcr.io",
+        "docker.io",
+        "quay.io"
+      ],
+      "cicd_user_agents": [
+        "GitLab-Runner/.*",
+        "GitHub-Actions/.*",
+        "CircleCI/.*"
+      ],
+      "trusted_ip_ranges": [
+        "10.0.0.0/8",
+        "192.168.0.0/16"
+      ],
+      "bypass_for_authenticated": false
+    },
+    "observability": {
+      "log_workarounds": true,
+      "log_client_detection": true,
+      "enable_metrics": true,
+      "metrics_prefix": "ads_registry_compat_",
+      "log_sample_rate": 1.0,
+      "log_success_only": false
+    }
+  }
+}

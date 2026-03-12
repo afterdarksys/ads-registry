@@ -13,6 +13,8 @@ type Store interface {
 	// Namespace and Repository Management
 	CreateNamespace(ctx context.Context, name string) error
 	CreateRepository(ctx context.Context, namespace, name string) error
+	ListRepositories(ctx context.Context, limit int, last string) ([]string, error)
+	ListTags(ctx context.Context, repo string, limit int, last string) ([]string, error)
 
 	// Manifests
 	PutManifest(ctx context.Context, repo, reference string, mediaType string, digest string, payload []byte) error
@@ -33,6 +35,16 @@ type Store interface {
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	AuthenticateUser(ctx context.Context, username, password string) (*User, error)
 	CreateUser(ctx context.Context, username, passwordHash string, scopes []string) error
+	ListUsers(ctx context.Context) ([]User, error)
+
+	// Groups and Quotas
+	CreateGroup(ctx context.Context, name string) error
+	AddUserToGroup(ctx context.Context, username, groupName string) error
+	CheckQuota(ctx context.Context, namespace string) (*Quota, error)
+	SetQuota(ctx context.Context, namespace string, limitBytes int64) error
+	UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error
+	ListGroups(ctx context.Context) ([]Group, error)
+	ListQuotas(ctx context.Context) ([]Quota, error)
 
 	Close() error
 }
@@ -42,6 +54,18 @@ type User struct {
 	Username     string
 	PasswordHash string
 	Scopes       []string // Simplified RBAC for MVP
+}
+
+type Group struct {
+	ID   int
+	Name string
+}
+
+type Quota struct {
+	NamespaceID int
+	Namespace   string
+	LimitBytes  int64
+	UsedBytes   int64
 }
 
 // Minimal stub for ScanReport in DB context if needed later

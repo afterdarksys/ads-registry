@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,8 +16,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/ryan/ads-registry/internal/api/management"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
+	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
+	"github.com/ryan/ads-registry/internal/cache"
+	"github.com/ryan/ads-registry/internal/compat"
 	"github.com/ryan/ads-registry/internal/config"
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/db/postgres"
@@ -24,10 +29,13 @@ import (
 	"github.com/ryan/ads-registry/internal/health"
 	"github.com/ryan/ads-registry/internal/logging"
 	"github.com/ryan/ads-registry/internal/policy"
+	"github.com/ryan/ads-registry/internal/queue"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/scanner/trivy"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/storage/local"
+	"github.com/ryan/ads-registry/internal/storage/oci"
+	"github.com/ryan/ads-registry/internal/storage/s3"
 	"github.com/ryan/ads-registry/internal/vault"
 	"github.com/ryan/ads-registry/internal/webhooks"
 	"github.com/spf13/cobra"
@@ -43,6 +51,43 @@ var serveCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(serveCmd)
+}
+
+// scannerEngineAdapter adapts scanner.Engine to queue.ScanEngine
+type scannerEngineAdapter struct {
+	engine scanner.Engine
+}
+
+func (a *scannerEngineAdapter) Name() string {
+	return a.engine.Name()
+}
+
+func (a *scannerEngineAdapter) Scan(ctx context.Context, namespace, repo, digest string) (*queue.ScanReport, error) {
+	report, err := a.engine.Scan(ctx, namespace, repo, digest)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert scanner.Report to queue.ScanReport
+	vulns := make([]queue.Vuln, len(report.Vulnerabilities))
+	for i, v := range report.Vulnerabilities {
+		vulns[i] = queue.Vuln{
+			ID:          v.ID,
+			Package:     v.Package,
+			Version:     v.Version,
+			FixVersion:  v.FixVersion,
+			Severity:    v.Severity,
+			Description: v.Description,
+		}
+	}
+
+	return &queue.ScanReport{
+		Digest:          report.Digest,
+		ScannerName:     report.ScannerName,
+		ScannerVersion:  report.ScannerVersion,
+		CreatedAt:       report.CreatedAt,
+		Vulnerabilities: vulns,
+	}, nil
 }
 
 func runServer() {
@@ -148,12 +193,86 @@ func runServer() {
 	defer store.Close()
 	logger.Info(fmt.Sprintf("Initialized Database: %s", cfg.Database.Driver))
 
+	// Init Redis Cache (optional)
+	var redisCache *cache.RedisCache
+	if cfg.Redis.Enabled {
+		logger.Info("Initializing Redis cache...")
+		var err error
+		redisCache, err = cache.NewRedis(cache.Config{
+			Address:  cfg.Redis.Address,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+			Enabled:  cfg.Redis.Enabled,
+		})
+		if err != nil {
+			logger.Error("Failed to initialize Redis cache", err)
+			log.Fatalf("failed to init Redis: %v", err)
+		}
+		logger.Info(fmt.Sprintf("Redis cache initialized: %s", cfg.Redis.Address))
+
+		// Wrap database store with caching layer
+		store = cache.NewCachedStore(store, redisCache, cache.TTLConfig{
+			Manifest:   time.Duration(cfg.Redis.TTL.Manifest) * time.Second,
+			Signature:  time.Duration(cfg.Redis.TTL.Signature) * time.Second,
+			ScanReport: time.Duration(cfg.Redis.TTL.ScanReport) * time.Second,
+			Policy:     time.Duration(cfg.Redis.TTL.Policy) * time.Second,
+		})
+	} else {
+		logger.Info("Redis caching disabled")
+	}
+
 	// 2. Init Storage
 	var storageProvider storage.Provider
-	if cfg.Storage.Driver == "local" {
+	switch cfg.Storage.Driver {
+	case "local":
 		storageProvider, err = local.New(cfg.Storage.Local.RootDirectory)
-	} else {
-		log.Fatalf("unsupported storage driver %s", cfg.Storage.Driver)
+	case "s3":
+		if cfg.Storage.S3 == nil {
+			log.Fatal("S3 storage configuration is required when driver is 's3'")
+		}
+		storageProvider, err = s3.New(
+			cfg.Storage.S3.Endpoint,
+			cfg.Storage.S3.Region,
+			cfg.Storage.S3.Bucket,
+			cfg.Storage.S3.AccessKeyID,
+			cfg.Storage.S3.SecretAccessKey,
+			false, // usePathStyle
+		)
+	case "minio":
+		if cfg.Storage.MinIO == nil {
+			log.Fatal("MinIO storage configuration is required when driver is 'minio'")
+		}
+		// MinIO uses path-style addressing
+		endpoint := cfg.Storage.MinIO.Endpoint
+		if cfg.Storage.MinIO.UseSSL {
+			endpoint = "https://" + endpoint
+		} else {
+			endpoint = "http://" + endpoint
+		}
+		storageProvider, err = s3.New(
+			endpoint,
+			cfg.Storage.MinIO.Region,
+			cfg.Storage.MinIO.Bucket,
+			cfg.Storage.MinIO.AccessKeyID,
+			cfg.Storage.MinIO.SecretAccessKey,
+			true, // usePathStyle for MinIO
+		)
+	case "oci":
+		if cfg.Storage.OCI == nil {
+			log.Fatal("OCI storage configuration is required when driver is 'oci'")
+		}
+		storageProvider, err = oci.New(oci.Config{
+			Namespace:      cfg.Storage.OCI.Namespace,
+			Bucket:         cfg.Storage.OCI.Bucket,
+			Region:         cfg.Storage.OCI.Region,
+			TenancyID:      cfg.Storage.OCI.TenancyID,
+			UserID:         cfg.Storage.OCI.UserID,
+			Fingerprint:    cfg.Storage.OCI.Fingerprint,
+			PrivateKeyPath: cfg.Storage.OCI.PrivateKeyPath,
+			PrivateKey:     cfg.Storage.OCI.PrivateKey,
+		})
+	default:
+		log.Fatalf("unsupported storage driver: %s (supported: local, s3, minio, oci)", cfg.Storage.Driver)
 	}
 	if err != nil {
 		logger.Error("Failed to initialize storage", err)
@@ -163,8 +282,28 @@ func runServer() {
 
 	// 3. Router
 	r := chi.NewRouter()
-	r.Use(logging.HTTPLoggingMiddleware(logger)) // Enterprise logging middleware
+
+	// Initialize compatibility middleware
+	compatConfig := convertCompatConfig(cfg.Compatibility)
+	compatMiddleware, err := compat.NewMiddleware(&compatConfig)
+	if err != nil {
+		logger.Error("Failed to initialize compatibility middleware", err)
+		log.Fatalf("failed to init compatibility middleware: %v", err)
+	}
+	if cfg.Compatibility.Enabled {
+		logger.Info("Compatibility system enabled (Postfix-style client workarounds)")
+	}
+
+	// Middleware chain (order matters!)
+	// 1. Client detection (early - enriches context)
+	r.Use(compatMiddleware.ClientDetectionMiddleware)
+	// 2. Logging (logs with client info if available)
+	r.Use(logging.HTTPLoggingMiddleware(logger))
+	// 3. Compatibility workarounds (applies fixes based on detected client)
+	r.Use(compatMiddleware.CompatibilityMiddleware)
+	// 4. Recovery (catch panics)
 	r.Use(middleware.Recoverer)
+	// 5. Rate limiting
 	r.Use(httprate.LimitByIP(100, 1*time.Minute))
 
 	// Management & Observability
@@ -180,8 +319,58 @@ func runServer() {
 	engines := []scanner.Engine{
 		trivy.New("/tmp/trivy-cache"),
 	}
-	scanWorker := scanner.NewWorker(store, storageProvider, engines, wd)
-	scanWorker.Start(context.Background(), 2)
+
+	// Choose scanner implementation based on database driver and queue configuration
+	var riverWorker *scanner.RiverWorker
+	var queueClient *queue.Client
+
+	if cfg.Queue.Enabled && (cfg.Database.Driver == "postgres" || cfg.Database.Driver == "pgsqllite") {
+		// Use River for PostgreSQL
+		logger.Info("Initializing River job queue for vulnerability scanning")
+
+		// Run River migrations
+		logger.Info("Running River database migrations...")
+		if err := queue.RunMigrations(context.Background(), cfg.Database.DSN); err != nil {
+			logger.Error("Failed to run River migrations", err)
+			log.Fatalf("failed to run River migrations: %v", err)
+		}
+		logger.Info("River migrations completed successfully")
+
+		// Convert engines to queue.ScanEngine
+		queueEngines := make([]queue.ScanEngine, len(engines))
+		for i, eng := range engines {
+			queueEngines[i] = &scannerEngineAdapter{engine: eng}
+		}
+
+		var err error
+		queueClient, err = queue.NewClient(
+			context.Background(),
+			cfg.Database.DSN,
+			cfg.Queue.DefaultQueue,
+			cfg.Queue.VulnerabilityQueue,
+			cfg.Queue.PeriodicQueue,
+			store,
+			storageProvider,
+			queueEngines,
+			wd,
+		)
+		if err != nil {
+			logger.Error("Failed to initialize River queue", err)
+			log.Fatalf("failed to init River queue: %v", err)
+		}
+
+		riverWorker = scanner.NewRiverWorker(queueClient)
+		if err := riverWorker.Start(context.Background()); err != nil {
+			logger.Error("Failed to start River worker", err)
+			log.Fatalf("failed to start River worker: %v", err)
+		}
+		logger.Info("River job queue started successfully")
+	} else {
+		// Use channel-based scanner for SQLite or when queue is disabled
+		logger.Info("Using channel-based scanner (SQLite mode)")
+		channelWorker := scanner.NewWorker(store, storageProvider, engines, wd)
+		channelWorker.Start(context.Background(), 2)
+	}
 
 	// 2. CEL Policy Admisson Rules
 	enf, err := policy.NewEnforcer(store)
@@ -192,19 +381,23 @@ func runServer() {
 	enf.AddRule(`request.namespace != "blacklist"`)
 	enf.AddRule(`request.method == "GET" || request.namespace == "trusted"`)
 
-	// 3. Starlark Embedded Automation
+	// 3. Initialize Auth Token Service
+	tokenService, err := auth.NewTokenService(cfg.Auth)
+	if err != nil {
+		logger.Error("Failed to initialize token service", err)
+		log.Fatalf("failed to init token service: %v", err)
+	}
+	logger.Info("Token service initialized successfully")
+
+	// 4. Starlark Embedded Automation
 	starEng := automation.NewEngine()
 
-	v2api := v2.NewRouter(store, storageProvider, nil, enf, starEng) // passing enf for policy control, starEng for automation
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng) // passing enf for policy control, starEng for automation
 	v2api.Register(r)
 
-	// Admin Dashboard API Stub
-	r.Route("/api/v1", func(api chi.Router) {
-		api.Get("/stats", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"total_repos": 142, "storage_used": "42.5 GB", "critical_vulns": 12, "policy_blocks": 842}`))
-		})
-	})
+	// Admin Dashboard Management API
+	managementRouter := management.NewRouter(store, tokenService, enf, starEng)
+	managementRouter.Register(r)
 
 	// React SPA Server
 	distDir := "web/dist"
@@ -244,6 +437,7 @@ func runServer() {
 			WriteTimeout:      cfg.Server.WriteTimeout,
 			IdleTimeout:       cfg.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
 		}
 		go func() {
 			logger.Info(fmt.Sprintf("Starting secure registry on %s:%d", cfg.Server.Address, cfg.Server.TLS.Port))
@@ -278,6 +472,25 @@ func runServer() {
 		}
 	}
 
+	// Stop River worker if running
+	if riverWorker != nil {
+		logger.Info("Stopping River job queue...")
+		if err := riverWorker.Stop(ctx); err != nil {
+			logger.Error("Error stopping River worker", err)
+		}
+		if err := queueClient.Close(); err != nil {
+			logger.Error("Error closing River queue client", err)
+		}
+	}
+
+	// Close Redis connection
+	if redisCache != nil {
+		logger.Info("Closing Redis connection...")
+		if err := redisCache.Close(); err != nil {
+			logger.Error("Error closing Redis", err)
+		}
+	}
+
 	// Close database connection
 	logger.Info("Closing database connection...")
 	if err := store.Close(); err != nil {
@@ -285,4 +498,62 @@ func runServer() {
 	}
 
 	logger.Info("Server exited cleanly")
+}
+
+// convertCompatConfig converts config.CompatibilityConfig to compat.Config
+func convertCompatConfig(cfg config.CompatibilityConfig) compat.Config {
+	return compat.Config{
+		Enabled: cfg.Enabled,
+		DockerClientWorkarounds: compat.DockerWorkarounds{
+			EnableDocker29ManifestFix: cfg.DockerClientWorkarounds.EnableDocker29ManifestFix,
+			ForceHTTP1ForManifests:    cfg.DockerClientWorkarounds.ForceHTTP1ForManifests,
+			DisableChunkedEncoding:    cfg.DockerClientWorkarounds.DisableChunkedEncoding,
+			MaxManifestSize:           cfg.DockerClientWorkarounds.MaxManifestSize,
+			ExtraFlushes:              cfg.DockerClientWorkarounds.ExtraFlushes,
+			HeaderWriteDelay:          cfg.DockerClientWorkarounds.HeaderWriteDelay,
+		},
+		ProtocolEmulation: compat.ProtocolEmulation{
+			EmulateDockerRegistryV2: cfg.ProtocolEmulation.EmulateDockerRegistryV2,
+			EmulateDistributionV3:   cfg.ProtocolEmulation.EmulateDistributionV3,
+			ExposeOCIFeatures:       cfg.ProtocolEmulation.ExposeOCIFeatures,
+			StrictMode:              cfg.ProtocolEmulation.StrictMode,
+		},
+		BrokenClientHacks: compat.BrokenClientHacks{
+			PodmanDigestWorkaround:  cfg.BrokenClientHacks.PodmanDigestWorkaround,
+			SkopeoLayerReuse:        cfg.BrokenClientHacks.SkopeoLayerReuse,
+			CraneManifestFormat:     cfg.BrokenClientHacks.CraneManifestFormat,
+			ContainerdContentLength: cfg.BrokenClientHacks.ContainerdContentLength,
+			BuildkitParallelUpload:  cfg.BrokenClientHacks.BuildkitParallelUpload,
+			NerdctlMissingHeaders:   cfg.BrokenClientHacks.NerdctlMissingHeaders,
+		},
+		TLSCompatibility: compat.TLSCompatibility{
+			MinTLSVersion:        cfg.TLSCompatibility.MinTLSVersion,
+			EnableLegacyCiphers:  cfg.TLSCompatibility.EnableLegacyCiphers,
+			HTTP2Enabled:         cfg.TLSCompatibility.HTTP2Enabled,
+			ForceHTTP1ForClients: cfg.TLSCompatibility.ForceHTTP1ForClients,
+			ALPNProtocols:        cfg.TLSCompatibility.ALPNProtocols,
+		},
+		HeaderWorkarounds: compat.HeaderWorkarounds{
+			AlwaysSendDistributionAPIVersion: cfg.HeaderWorkarounds.AlwaysSendDistributionAPIVersion,
+			ContentTypeFixups:                cfg.HeaderWorkarounds.ContentTypeFixups,
+			LocationHeaderFormat:             cfg.HeaderWorkarounds.LocationHeaderFormat,
+			EnableCORS:                       cfg.HeaderWorkarounds.EnableCORS,
+			AcceptMalformedAccept:            cfg.HeaderWorkarounds.AcceptMalformedAccept,
+			NormalizeDigestHeader:            cfg.HeaderWorkarounds.NormalizeDigestHeader,
+		},
+		RateLimitExceptions: compat.RateLimitExceptions{
+			TrustedRegistries:      cfg.RateLimitExceptions.TrustedRegistries,
+			CICDUserAgents:         cfg.RateLimitExceptions.CICDUserAgents,
+			TrustedIPRanges:        cfg.RateLimitExceptions.TrustedIPRanges,
+			BypassForAuthenticated: cfg.RateLimitExceptions.BypassForAuthenticated,
+		},
+		Observability: compat.ObservabilityConfig{
+			LogWorkarounds:     cfg.Observability.LogWorkarounds,
+			LogClientDetection: cfg.Observability.LogClientDetection,
+			EnableMetrics:      cfg.Observability.EnableMetrics,
+			MetricsPrefix:      cfg.Observability.MetricsPrefix,
+			LogSampleRate:      cfg.Observability.LogSampleRate,
+			LogSuccessOnly:     cfg.Observability.LogSuccessOnly,
+		},
+	}
 }

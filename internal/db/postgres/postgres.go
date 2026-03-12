@@ -95,6 +95,23 @@ func (s *PostgresStore) migrate() error {
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS groups (
+		id SERIAL PRIMARY KEY,
+		name TEXT UNIQUE NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS user_groups (
+		user_id INTEGER NOT NULL REFERENCES users(id),
+		group_id INTEGER NOT NULL REFERENCES groups(id),
+		PRIMARY KEY (user_id, group_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS quotas (
+		namespace_id INTEGER PRIMARY KEY REFERENCES namespaces(id),
+		limit_bytes BIGINT NOT NULL,
+		used_bytes BIGINT NOT NULL DEFAULT 0
+	);
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -134,6 +151,92 @@ func (s *PostgresStore) CreateRepository(ctx context.Context, namespace, name st
 
 	_, err = s.db.ExecContext(ctx, "INSERT INTO repositories (namespace_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING", nsID, name)
 	return err
+}
+
+func (s *PostgresStore) ListRepositories(ctx context.Context, limit int, last string) ([]string, error) {
+	lastNs, lastRepo := "", ""
+	if last != "" {
+		lastNs, lastRepo = parseRepoPath(last)
+	}
+
+	query := `
+		SELECT n.name, r.name
+		FROM repositories r
+		JOIN namespaces n ON r.namespace_id = n.id
+	`
+	var args []interface{}
+	paramIdx := 1
+	if last != "" {
+		query += fmt.Sprintf(" WHERE n.name > $%d OR (n.name = $%d AND r.name > $%d)", paramIdx, paramIdx+1, paramIdx+2)
+		args = append(args, lastNs, lastNs, lastRepo)
+		paramIdx += 3
+	}
+	query += " ORDER BY n.name, r.name"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", paramIdx)
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []string
+	for rows.Next() {
+		var ns, name string
+		if err := rows.Scan(&ns, &name); err != nil {
+			return nil, err
+		}
+		if ns == "library" {
+			repos = append(repos, name)
+		} else {
+			repos = append(repos, ns+"/"+name)
+		}
+	}
+	return repos, rows.Err()
+}
+
+func (s *PostgresStore) ListTags(ctx context.Context, repo string, limit int, last string) ([]string, error) {
+	ns, repoName := parseRepoPath(repo)
+
+	query := `
+		SELECT m.reference
+		FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = $1 AND r.name = $2 AND m.reference NOT LIKE 'sha256:%'
+	`
+	args := []interface{}{ns, repoName}
+	paramIdx := 3
+
+	if last != "" {
+		query += fmt.Sprintf(" AND m.reference > $%d", paramIdx)
+		args = append(args, last)
+		paramIdx++
+	}
+	query += " ORDER BY m.reference"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", paramIdx)
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
 }
 
 func (s *PostgresStore) PutManifest(ctx context.Context, repo, reference string, mediaType string, digest string, payload []byte) error {
@@ -310,10 +413,160 @@ func (s *PostgresStore) CreateUser(ctx context.Context, username, passwordHash s
 	return err
 }
 
+func (s *PostgresStore) ListUsers(ctx context.Context) ([]db.User, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []db.User
+	for rows.Next() {
+		var u db.User
+		var scopes string
+		if err := rows.Scan(&u.ID, &u.Username, &scopes); err != nil {
+			return nil, err
+		}
+		u.Scopes = []string{scopes}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 // Helper functions for password hashing
 func verifyPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
+
+// --------------------------------------------------------------------------------
+// Quotas & Groups
+// --------------------------------------------------------------------------------
+
+func (s *PostgresStore) CreateGroup(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO groups (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+	return err
+}
+
+func (s *PostgresStore) AddUserToGroup(ctx context.Context, username, groupName string) error {
+	var userID, groupID int
+
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM users WHERE username = $1", username).Scan(&userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return db.ErrNotFound
+		}
+		return err
+	}
+
+	err = s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE name = $1", groupName).Scan(&groupID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return db.ErrNotFound
+		}
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", userID, groupID)
+	return err
+}
+
+func (s *PostgresStore) ListGroups(ctx context.Context) ([]db.Group, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []db.Group
+	for rows.Next() {
+		var g db.Group
+		if err := rows.Scan(&g.ID, &g.Name); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+func (s *PostgresStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
+		FROM quotas q
+		JOIN namespaces n ON q.namespace_id = n.id
+		ORDER BY n.name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var quotas []db.Quota
+	for rows.Next() {
+		var q db.Quota
+		if err := rows.Scan(&q.NamespaceID, &q.Namespace, &q.LimitBytes, &q.UsedBytes); err != nil {
+			return nil, err
+		}
+		quotas = append(quotas, q)
+	}
+	return quotas, rows.Err()
+}
+
+func (s *PostgresStore) CheckQuota(ctx context.Context, namespace string) (*db.Quota, error) {
+	var q db.Quota
+	err := s.db.QueryRowContext(ctx, `
+		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
+		FROM quotas q
+		JOIN namespaces n ON q.namespace_id = n.id
+		WHERE n.name = $1
+	`, namespace).Scan(&q.NamespaceID, &q.Namespace, &q.LimitBytes, &q.UsedBytes)
+	
+	if err == sql.ErrNoRows {
+		// No quota set for this namespace, treat as unlimited
+		return nil, nil
+	}
+	return &q, err
+}
+
+func (s *PostgresStore) SetQuota(ctx context.Context, namespace string, limitBytes int64) error {
+	err := s.CreateNamespace(ctx, namespace)
+	if err != nil {
+		return err
+	}
+
+	var nsID int
+	err = s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO quotas (namespace_id, limit_bytes, used_bytes) 
+		VALUES ($1, $2, 0)
+		ON CONFLICT(namespace_id) DO UPDATE SET limit_bytes=EXCLUDED.limit_bytes
+	`, nsID, limitBytes)
+	return err
+}
+
+func (s *PostgresStore) UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error {
+	var nsID int
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// If namespace doesn't exist yet, there's no quota tracked for it
+			return nil
+		}
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE quotas SET used_bytes = used_bytes + $1 WHERE namespace_id = $2
+	`, sizeDelta, nsID)
+	return err
+}
+
+// --------------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------------
 
 // parseRepoPath splits a repository path into namespace and repository name
 // Examples:

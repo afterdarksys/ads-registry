@@ -13,7 +13,7 @@ This document tracks planned features, improvements, and known issues for the AD
 
 - [ ] **Fix blob upload race condition**
   - Implement distributed locking (Redis or PostgreSQL advisory locks)
-  - Add idempotency checks (blob already exists)
+  - [x] Add idempotency checks (blob already exists)
   - Prevent concurrent writes to same blob
   - Files: `internal/api/v2/router.go:298-350`
 
@@ -109,18 +109,18 @@ This document tracks planned features, improvements, and known issues for the AD
 
 - [ ] **Advanced policy features**
   - Time-based policies (deny after sunset)
-  - Quota enforcement (storage limits per namespace)
+  - [x] Quota enforcement (storage limits per namespace)
   - Image retention policies (auto-delete old images)
   - Compliance policies (require certain labels)
 
 ### User Experience
-- [ ] **Web Dashboard (React)**
-  - Repository browser
-  - Image list with tags
-  - Vulnerability reports
-  - Policy configuration UI
-  - User management
-  - Audit log viewer
+- [x] **Web Dashboard (React)**
+  - [x] Repository browser
+  - [ ] Image list with tags
+  - [ ] Vulnerability reports
+  - [x] Policy configuration UI
+  - [x] User management
+  - [ ] Audit log viewer
 
 - [ ] **CLI improvements**
   - `ads-registry list repos` - List all repositories

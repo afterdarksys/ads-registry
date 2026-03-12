@@ -1,0 +1,73 @@
+---
+# Main tasks for deploying ADS Container Registry
+
+- name: Ensure registry installation directory exists
+  file:
+    path: "{{ registry_install_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Ensure registry data directory exists
+  file:
+    path: "{{ registry_data_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Build registry binary locally (if requested)
+  delegate_to: localhost
+  become: no
+  shell: |
+    cd /Users/ryan/development/ads-registry
+    GOOS=linux GOARCH=amd64 go build -o ads-registry-linux -ldflags="-s -w" ./cmd/ads-registry
+  when: build_binary | default(false)
+  changed_when: true
+
+- name: Copy registry binary to server
+  copy:
+    src: /Users/ryan/development/ads-registry/ads-registry-linux
+    dest: "{{ registry_install_dir }}/ads-registry"
+    mode: '0755'
+  notify: restart ads-registry
+
+- name: Check if config.json exists
+  stat:
+    path: "{{ registry_config_file }}"
+  register: config_stat
+
+- name: Copy registry configuration
+  template:
+    src: config.json.j2
+    dest: "{{ registry_config_file }}"
+    mode: '0644'
+  when: not config_stat.stat.exists
+  notify: restart ads-registry
+
+- name: Install systemd service file
+  template:
+    src: ads-registry.service.j2
+    dest: /etc/systemd/system/{{ registry_service_name }}.service
+    mode: '0644'
+  notify: restart ads-registry
+
+- name: Enable and start ads-registry service
+  systemd:
+    name: "{{ registry_service_name }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Wait for registry to be ready
+  wait_for:
+    port: "{{ registry_http_port }}"
+    delay: 2
+    timeout: 30
+
+- name: Verify registry health
+  uri:
+    url: "http://localhost:{{ registry_http_port }}/v2/"
+    method: GET
+    status_code: 401
+  register: health_check
+  retries: 3
+  delay: 2
+  until: health_check.status == 401

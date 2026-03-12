@@ -57,8 +57,6 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	_ = dbUser // we have the authenticated user
-
 	// 3. Parse Scopes from ?scope=repository:library/ubuntu:pull,push
 	// Docker might request multiple scopes, but standard clients usually just ask for one.
 	qScope := req.URL.Query().Get("scope")
@@ -72,7 +70,32 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 			actions := strings.Split(parts[2], ",")
 
 			// AuthZ Check: Does user have permission for these actions on this resource?
-			// For MVP, if they authenticated, we grant what they ask.
+			// Check if user's scopes authorize this request
+			authorized := false
+			for _, userScope := range dbUser.Scopes {
+				// Wildcard grants everything
+				if userScope == "*" {
+					authorized = true
+					break
+				}
+				// Check exact match: repository:namespace/repo:action1,action2
+				if userScope == qScope {
+					authorized = true
+					break
+				}
+				// Check pattern match for wildcards like repository:*:push,pull
+				if matchesScope(userScope, typ, name, actions) {
+					authorized = true
+					break
+				}
+			}
+
+			if !authorized {
+				log.Printf("[AUTH] User %s denied access to %s:%s:%s", user, typ, name, strings.Join(actions, ","))
+				http.Error(w, "Forbidden: insufficient permissions", http.StatusForbidden)
+				return
+			}
+
 			grantedAccess = append(grantedAccess, AccessEntry{
 				Type:    typ,
 				Name:    name,
@@ -95,4 +118,61 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		"access_token": token, // For older clients
 		"expires_in":   3600,
 	})
+}
+
+// matchesScope checks if a user scope pattern matches the requested resource
+func matchesScope(userScope, requestedType, requestedName string, requestedActions []string) bool {
+	// Parse user scope format: repository:namespace/*:push,pull
+	parts := strings.Split(userScope, ":")
+	if len(parts) < 2 {
+		return false
+	}
+
+	scopeType := parts[0]
+	scopeName := parts[1]
+	var scopeActions []string
+	if len(parts) >= 3 {
+		scopeActions = strings.Split(parts[2], ",")
+	}
+
+	// Check type match
+	if scopeType != requestedType {
+		return false
+	}
+
+	// Check name match with wildcard support
+	if scopeName != "*" && scopeName != requestedName {
+		// Check for prefix wildcards like "namespace/*"
+		if strings.HasSuffix(scopeName, "/*") {
+			prefix := strings.TrimSuffix(scopeName, "/*")
+			if !strings.HasPrefix(requestedName, prefix+"/") {
+				return false
+			}
+		} else {
+			return false
+		}
+	}
+
+	// Check actions if specified
+	if len(scopeActions) > 0 {
+		scopeActionSet := make(map[string]bool)
+		for _, action := range scopeActions {
+			action = strings.TrimSpace(action)
+			scopeActionSet[action] = true
+		}
+
+		// Wildcard action grants all actions
+		if scopeActionSet["*"] {
+			return true
+		}
+
+		// Check if all requested actions are granted
+		for _, reqAction := range requestedActions {
+			if !scopeActionSet[reqAction] {
+				return false
+			}
+		}
+	}
+
+	return true
 }
