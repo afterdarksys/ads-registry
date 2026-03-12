@@ -13,6 +13,19 @@ Following Postfix's proven principles:
 5. **Document each hack**: Every workaround includes issue tracker references and removal criteria
 6. **Easy removal path**: When clients fix bugs, workarounds can be cleanly disabled
 
+## Credits & Inspiration
+
+This system draws direct inspiration from:
+
+- **Wietse Venema** - Creator of Postfix, pioneer of pragmatic compatibility in production systems
+- **Viktor Dukhovni** - Postfix maintainer whose work on TLS compatibility and workarounds for broken implementations set the standard for handling real-world protocol violations
+
+The configuration-driven approach mirrors Postfix's `main.cf` settings, where complex workarounds (header_checks, body_checks, smtp_tls_*, etc.) are exposed as observable, documented configuration options rather than hidden hacks.
+
+Special recognition to the battle-hardened Postfix deployments in financial institutions worldwide, which demonstrated that production systems must handle the messy reality of diverse, broken clients - not assume perfect RFC compliance.
+
+> "In theory, theory and practice are the same. In practice, they are not." - The Postfix Way
+
 ## Package Structure
 
 ```
