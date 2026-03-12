@@ -32,3 +32,4 @@ Thumbs.db
 .env
 .env.local
 ads-registry-test
+ads-registry-linux
