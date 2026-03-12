@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryan/ads-registry/internal/metrics"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/storage"
 )
@@ -43,6 +44,13 @@ func (s *Scanner) Name() string {
 func (s *Scanner) Scan(ctx context.Context, namespace, repo, digest string) (*scanner.Report, error) {
 	log.Printf("[ClamAV] Scanning %s/%s@%s for malware...", namespace, repo, digest)
 
+	// Track scan duration
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		metrics.ScanDuration.WithLabelValues("clamav").Observe(duration)
+	}()
+
 	// Create temp directory for this scan
 	scanDir := filepath.Join(s.tempDir, digest)
 	if err := os.MkdirAll(scanDir, 0755); err != nil {
@@ -59,6 +67,12 @@ func (s *Scanner) Scan(ctx context.Context, namespace, repo, digest string) (*sc
 	findings, err := s.scanDirectory(ctx, scanDir)
 	if err != nil {
 		return nil, fmt.Errorf("malware scan failed: %w", err)
+	}
+
+	// Track malware detections
+	for _, finding := range findings {
+		metrics.MalwareDetections.WithLabelValues(finding.ThreatType).Inc()
+		metrics.ScanFindings.WithLabelValues("clamav", finding.Severity).Inc()
 	}
 
 	// Convert findings to report

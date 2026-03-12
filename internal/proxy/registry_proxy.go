@@ -128,13 +128,14 @@ func (p *RegistryProxy) ProxyManifest(ctx context.Context, upstream, repo, refer
 }
 
 // ProxyBlob proxies a blob request to upstream registry
-func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest string) (io.ReadCloser, int64, error) {
+// Returns: reader, size, cacheHit, error
+func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest string) (io.ReadCloser, int64, bool, error) {
 	p.mu.RLock()
 	upstreamRegistry, exists := p.upstreams[upstream]
 	p.mu.RUnlock()
 
 	if !exists {
-		return nil, 0, fmt.Errorf("upstream registry not found: %s", upstream)
+		return nil, 0, false, fmt.Errorf("upstream registry not found: %s", upstream)
 	}
 
 	// Check if blob is already cached locally
@@ -143,7 +144,7 @@ func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest st
 		log.Printf("[Proxy] Blob %s found in cache (%d bytes)", digest, size)
 		reader, err := p.storage.Reader(ctx, blobPath, 0)
 		if err == nil {
-			return reader, size, nil
+			return reader, size, true, nil // Cache hit
 		}
 		log.Printf("[Proxy] Warning: cached blob read failed: %v", err)
 	}
@@ -155,7 +156,7 @@ func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest st
 
 	req, err := http.NewRequestWithContext(ctx, "GET", blobURL, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+		return nil, 0, false, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Add authentication if configured
@@ -165,12 +166,12 @@ func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest st
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to fetch blob: %w", err)
+		return nil, 0, false, fmt.Errorf("failed to fetch blob: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, 0, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		return nil, 0, false, fmt.Errorf("upstream returned status %d", resp.StatusCode)
 	}
 
 	size := resp.ContentLength
@@ -182,7 +183,7 @@ func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest st
 
 	// Return response body to caller (they'll read while we cache in background)
 	// Note: This is a simplified approach. In production, use io.TeeReader to stream to both client and cache
-	return resp.Body, size, nil
+	return resp.Body, size, false, nil // Cache miss
 }
 
 // cacheManifest stores a manifest in local storage and database

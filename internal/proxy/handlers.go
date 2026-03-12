@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/ryan/ads-registry/internal/metrics"
 )
 
 // Handler handles HTTP requests for pull-through cache
@@ -52,6 +55,7 @@ func (h *Handler) ProxyManifestHandler(w http.ResponseWriter, r *http.Request) {
 	localRepo := "proxy/" + upstream + "/" + repo
 	if mediaType, digest, payload, err := h.proxy.db.GetManifest(r.Context(), localRepo, reference); err == nil {
 		log.Printf("[ProxyHandler] Manifest cache HIT: %s:%s", localRepo, reference)
+		metrics.ProxyCacheHits.WithLabelValues(upstream).Inc()
 		w.Header().Set("Content-Type", mediaType)
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.Header().Set("X-Cache", "HIT")
@@ -61,9 +65,14 @@ func (h *Handler) ProxyManifestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[ProxyHandler] Manifest cache MISS: %s:%s", localRepo, reference)
+	metrics.ProxyCacheMisses.WithLabelValues(upstream).Inc()
 
-	// Fetch from upstream and cache
+	// Fetch from upstream and cache (track duration)
+	startTime := time.Now()
 	mediaType, digest, payload, err := h.proxy.ProxyManifest(r.Context(), upstream, repo, reference)
+	duration := time.Since(startTime).Seconds()
+	metrics.UpstreamFetchDuration.WithLabelValues(upstream, "manifest").Observe(duration)
+
 	if err != nil {
 		log.Printf("[ProxyHandler] Failed to proxy manifest: %v", err)
 		http.Error(w, "failed to fetch manifest from upstream", http.StatusBadGateway)
@@ -92,7 +101,8 @@ func (h *Handler) ProxyBlobHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[ProxyHandler] Blob request: %s/%s@%s", upstream, repo, digest)
 
 	// Fetch blob (will check cache first)
-	reader, size, err := h.proxy.ProxyBlob(r.Context(), upstream, repo, digest)
+	startTime := time.Now()
+	reader, size, cacheHit, err := h.proxy.ProxyBlob(r.Context(), upstream, repo, digest)
 	if err != nil {
 		log.Printf("[ProxyHandler] Failed to proxy blob: %v", err)
 		http.Error(w, "failed to fetch blob from upstream", http.StatusBadGateway)
@@ -100,10 +110,19 @@ func (h *Handler) ProxyBlobHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
+	// Track cache metrics
+	if cacheHit {
+		metrics.ProxyCacheHits.WithLabelValues(upstream).Inc()
+	} else {
+		metrics.ProxyCacheMisses.WithLabelValues(upstream).Inc()
+		duration := time.Since(startTime).Seconds()
+		metrics.UpstreamFetchDuration.WithLabelValues(upstream, "blob").Observe(duration)
+	}
+
 	// Stream blob to client
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Docker-Content-Digest", digest)
-	w.Header().Set("Content-Length", string(rune(size)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.WriteHeader(http.StatusOK)
 
 	if _, err := io.Copy(w, reader); err != nil {
