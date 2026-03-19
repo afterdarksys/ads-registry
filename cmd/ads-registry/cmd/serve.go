@@ -16,10 +16,11 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/ryan/ads-registry/internal/api/auth"
 	"github.com/ryan/ads-registry/internal/api/management"
 	tenancyAPI "github.com/ryan/ads-registry/internal/api/tenancy"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
-	"github.com/ryan/ads-registry/internal/auth"
+	registryAuth "github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/cache"
 	"github.com/ryan/ads-registry/internal/compat"
@@ -453,7 +454,7 @@ func runServer() {
 	enf.AddRule(`request.method == "GET" || request.namespace == "trusted"`)
 
 	// 3. Initialize Auth Token Service
-	tokenService, err := auth.NewTokenService(cfg.Auth)
+	tokenService, err := registryAuth.NewTokenService(cfg.Auth)
 	if err != nil {
 		logger.Error("Failed to initialize token service", err)
 		log.Fatalf("failed to init token service: %v", err)
@@ -475,6 +476,10 @@ func runServer() {
 
 	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication
 	v2api.Register(r)
+
+	// OAuth2 Authentication API for Web UI
+	oauth2Router := auth.NewOAuth2Router(store, tokenService)
+	oauth2Router.Register(r)
 
 	// Admin Dashboard Management API
 	managementRouter := management.NewRouter(store, tokenService, enf, starEng)

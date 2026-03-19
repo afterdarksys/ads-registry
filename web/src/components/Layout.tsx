@@ -1,5 +1,7 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle } from 'lucide-react';
+import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle, LogOut, ChevronDown } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { useState } from 'react';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -14,6 +16,17 @@ const navigation = [
 
 export default function Layout() {
   const location = useLocation();
+  const { user, logout } = useAuth();
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const handleLogout = async () => {
+    await logout();
+    // The AuthContext will clear localStorage and redirect happens via ProtectedRoute
+  };
+
+  const getUserInitials = (username: string) => {
+    return username.charAt(0).toUpperCase();
+  };
 
   return (
     <div className="flex h-screen bg-muted/40 dark:bg-background">
@@ -62,11 +75,71 @@ export default function Layout() {
           <h2 className="text-lg font-semibold text-foreground">
             {navigation.find((item) => item.href === location.pathname)?.name || 'Admin Console'}
           </h2>
-          <div className="flex items-center gap-4">
-            <span className="text-sm font-medium">Administrator</span>
-            <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold">
-              A
-            </div>
+          <div className="relative">
+            <button
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted/50 transition-colors"
+            >
+              <div className="text-right">
+                <div className="text-sm font-medium">{user?.username || 'User'}</div>
+                <div className="text-xs text-muted-foreground">
+                  {user?.is_admin ? (
+                    <span className="inline-flex items-center gap-1">
+                      <Shield className="w-3 h-3" />
+                      Administrator
+                    </span>
+                  ) : (
+                    `${user?.namespaces.length || 0} namespace${user?.namespaces.length !== 1 ? 's' : ''}`
+                  )}
+                </div>
+              </div>
+              <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold">
+                {getUserInitials(user?.username || 'U')}
+              </div>
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${showUserMenu ? 'rotate-180' : ''}`} />
+            </button>
+
+            {/* User dropdown menu */}
+            {showUserMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={() => setShowUserMenu(false)}
+                ></div>
+                <div className="absolute right-0 mt-2 w-64 bg-card border border-border rounded-lg shadow-lg z-20 overflow-hidden">
+                  <div className="p-4 border-b border-border">
+                    <div className="font-medium">{user?.username}</div>
+                    <div className="text-sm text-muted-foreground mt-1">
+                      {user?.is_admin ? 'Full system access' : 'Limited access'}
+                    </div>
+                    {!user?.is_admin && user?.namespaces && user.namespaces.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-border">
+                        <div className="text-xs font-medium text-muted-foreground mb-1">Your namespaces:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {user.namespaces.slice(0, 5).map((ns) => (
+                            <span key={ns} className="text-xs px-2 py-0.5 bg-muted rounded">
+                              {ns}
+                            </span>
+                          ))}
+                          {user.namespaces.length > 5 && (
+                            <span className="text-xs text-muted-foreground">
+                              +{user.namespaces.length - 5} more
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-sm hover:bg-muted/50 transition-colors text-red-500"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Sign Out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </header>
         <main className="flex-1 overflow-auto p-8 bg-muted/20">
