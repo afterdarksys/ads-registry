@@ -18,6 +18,14 @@ type Config struct {
 	Queue         QueueConfig         `json:"queue"`
 	Redis         RedisConfig         `json:"redis"`
 	Compatibility CompatibilityConfig `json:"compatibility"`
+	Peers         []PeerRegistry      `json:"peers"`
+}
+
+type PeerRegistry struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+	Token    string `json:"token"`
+	Mode     string `json:"mode"` // "push", "pull", or "bidirectional"
 }
 
 type ServerConfig struct {

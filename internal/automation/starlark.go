@@ -74,6 +74,53 @@ func (e *Engine) ExecuteEvent(scriptPath string, eventName string, eventData map
 	return nil
 }
 
+// EvaluateSyncPolicy evaluates a Starlark python script returning a bool boolean to control registry-to-registry syncing
+func (e *Engine) EvaluateSyncPolicy(scriptPath string, eventData map[string]string) (bool, error) {
+	eventDict := starlark.NewDict(len(eventData))
+	for k, v := range eventData {
+		eventDict.SetKey(starlark.String(k), starlark.String(v))
+	}
+
+	eventStruct := starlarkstruct.FromStringDict(
+		starlark.String("Event"),
+		starlark.StringDict{
+			"type": starlark.String("sync_attempt"),
+			"data": eventDict,
+		},
+	)
+
+	thread := &starlark.Thread{
+		Name:  "registry_sync_policer",
+		Print: func(_ *starlark.Thread, msg string) { log.Printf("[Starlark Sync] %s", msg) },
+	}
+
+	globals, err := starlark.ExecFile(thread, scriptPath, nil, e.builtins)
+	if err != nil {
+		// If script is missing entirely, we default to block for safety or allow?
+		// Usually if file not found, we might want to return true.
+		// Let's defer that to the caller by returning the error.
+		return false, fmt.Errorf("failed to execute policy script %s: %w", scriptPath, err)
+	}
+
+	handlerName := "on_sync_attempt"
+	if handler, ok := globals[handlerName]; ok {
+		if fn, ok := handler.(starlark.Callable); ok {
+			val, err := starlark.Call(thread, fn, starlark.Tuple{eventStruct}, nil)
+			if err != nil {
+				return false, fmt.Errorf("failed to call starlark handler %s: %w", handlerName, err)
+			}
+			
+			if boolVal, ok := val.(starlark.Bool); ok {
+				return bool(boolVal), nil
+			}
+			return false, fmt.Errorf("on_sync_attempt must return a boolean, got %s", val.Type())
+		}
+	}
+
+	// Default allow if no policy hook is explicitly defined in a found script
+	return true, nil
+}
+
 // httpPostBuiltin provides a native http client to the Starlark runtime
 // usage: http_post("https://api.github.com/...", "{\"json\":\"body\"}")
 func httpPostBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

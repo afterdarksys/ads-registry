@@ -59,8 +59,25 @@ func (r *Router) Register(mux chi.Router) {
 
 		// Repositories
 		api.Get("/repositories", r.listRepositories)
-		api.Get("/repositories/{repo...}/tags", r.listTags)
-		api.Get("/repositories/{repo...}/manifests", r.listManifestsForRepo)
+		// FIVE-level repository (register FIRST - most specific)
+		api.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
+		api.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+
+		// FOUR-level repository
+		api.Get("/repositories/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
+		api.Get("/repositories/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+
+		// THREE-level repository
+		api.Get("/repositories/{org}/{namespace}/{repo}/tags", r.listTags)
+		api.Get("/repositories/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+
+		// TWO-level repository
+		api.Get("/repositories/{namespace}/{repo}/tags", r.listTags)
+		api.Get("/repositories/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+
+		// SINGLE-level repository (register LAST - least specific)
+		api.Get("/repositories/{repo}/tags", r.listTags)
+		api.Get("/repositories/{repo}/manifests", r.listManifestsForRepo)
 
 		// Upstream Registries
 		api.Get("/upstreams", r.listUpstreams)

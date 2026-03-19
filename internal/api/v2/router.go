@@ -21,6 +21,7 @@ import (
 	"github.com/ryan/ads-registry/internal/policy"
 	"github.com/ryan/ads-registry/internal/proxy"
 	"github.com/ryan/ads-registry/internal/storage"
+	"github.com/ryan/ads-registry/internal/sync"
 	"github.com/ryan/ads-registry/internal/upstreams"
 )
 
@@ -32,9 +33,10 @@ type Router struct {
 	enforcer      *policy.Enforcer
 	starlark      *automation.Engine
 	upstreamProxy *proxy.UpstreamProxy
+	syncManager   *sync.Manager
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
 		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
@@ -48,6 +50,7 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		enforcer:      enf,
 		starlark:      star,
 		upstreamProxy: upstreamProxy,
+		syncManager:   syncMgr,
 	}
 }
 
@@ -471,6 +474,11 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}()
+	}
+
+	// Trigger async master-peer synchronization
+	if r.syncManager != nil {
+		r.syncManager.EnqueuePush(quotaNs, fullRepo, ref, digest)
 	}
 }
 

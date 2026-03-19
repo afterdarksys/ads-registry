@@ -38,6 +38,7 @@ import (
 	"github.com/ryan/ads-registry/internal/storage/local"
 	"github.com/ryan/ads-registry/internal/storage/oci"
 	"github.com/ryan/ads-registry/internal/storage/s3"
+	"github.com/ryan/ads-registry/internal/sync"
 	"github.com/ryan/ads-registry/internal/tenancy"
 	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/vault"
@@ -467,7 +468,12 @@ func runServer() {
 	cronScheduler.Start()
 	logger.Info("Starlark cron scheduler started")
 
-	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy
+	// 6. Master-Peer Sync Engine
+	syncManager := sync.NewManager(cfg.Peers, starEng)
+	syncManager.Start(2) // 2 concurrent sync workers
+	defer syncManager.Stop()
+
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication
 	v2api.Register(r)
 
 	// Admin Dashboard Management API
