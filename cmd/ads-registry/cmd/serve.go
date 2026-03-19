@@ -481,6 +481,17 @@ func runServer() {
 	oauth2Router := auth.NewOAuth2Router(store, tokenService)
 	oauth2Router.Register(r)
 
+	// OIDC/SSO Authentication (Authentik)
+	oidcHandler, err := auth.NewOIDCHandler(cfg.Auth.OIDC, store, tokenService)
+	if err != nil {
+		logger.Error("Failed to initialize OIDC handler", err)
+		log.Fatalf("failed to init OIDC: %v", err)
+	}
+	if oidcHandler != nil {
+		oidcHandler.Register(r)
+		logger.Info("OIDC/SSO authentication enabled")
+	}
+
 	// Admin Dashboard Management API
 	managementRouter := management.NewRouter(store, tokenService, enf, starEng)
 	managementRouter.Register(r)

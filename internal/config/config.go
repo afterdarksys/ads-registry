@@ -101,6 +101,16 @@ type AuthConfig struct {
 	PrivateKey      string        `json:"private_key_path"`
 	PublicKey       string        `json:"public_key_path"`
 	TokenExpiration time.Duration `json:"token_expiration"` // Duration before tokens expire (default: 24h)
+	OIDC            OIDCConfig    `json:"oidc"`
+}
+
+type OIDCConfig struct {
+	Enabled      bool   `json:"enabled"`
+	Issuer       string `json:"issuer"`        // Authentik issuer URL (e.g., "https://sso.afterdarksys.com/application/o/ads-registry/")
+	ClientID     string `json:"client_id"`     // OIDC client ID
+	ClientSecret string `json:"client_secret"` // OIDC client secret
+	RedirectURL  string `json:"redirect_url"`  // Callback URL (e.g., "https://registry.afterdarksys.com/oauth2/callback")
+	Scopes       []string `json:"scopes"`      // OIDC scopes (default: ["openid", "profile", "email"])
 }
 
 type LoggingConfig struct {

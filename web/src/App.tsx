@@ -11,6 +11,7 @@ import Settings from './pages/Settings';
 import Upstreams from './pages/Upstreams';
 import Vulnerabilities from './pages/Vulnerabilities';
 import Login from './pages/Login';
+import AuthCallback from './pages/AuthCallback';
 import type { ReactNode } from 'react';
 
 // Protected route wrapper that redirects to login if not authenticated
@@ -58,6 +59,7 @@ export default function App() {
         <AuthProvider>
           <Routes>
             <Route path="/login" element={<LoginRoute />} />
+            <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
               <Route index element={<Dashboard />} />
               <Route path="users" element={<Users />} />

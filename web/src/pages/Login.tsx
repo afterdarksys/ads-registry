@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { LogIn, AlertCircle } from 'lucide-react';
+import { LogIn, AlertCircle, Shield } from 'lucide-react';
 
 interface LoginProps {
   onLoginSuccess: () => void;
@@ -122,6 +122,25 @@ export default function Login({ onLoginSuccess }: LoginProps) {
               )}
             </button>
           </form>
+
+          {/* Divider */}
+          <div className="relative my-6">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-border"></div>
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-card px-2 text-muted-foreground">Or continue with</span>
+            </div>
+          </div>
+
+          {/* SSO Login */}
+          <a
+            href="/oauth2/sso"
+            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-secondary text-secondary-foreground font-medium rounded-lg hover:bg-secondary/80 border border-border focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors"
+          >
+            <Shield className="w-5 h-5" />
+            Sign in with After Dark SSO
+          </a>
 
           {/* Footer Info */}
           <div className="mt-6 pt-6 border-t border-border">
