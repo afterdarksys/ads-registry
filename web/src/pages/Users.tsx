@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Users as UsersIcon, Shield, Plus, UsersRound, Trash2, Edit, Key } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Users() {
+  const { token } = useAuth();
   const [users, setUsers] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
 
@@ -13,13 +15,22 @@ export default function Users() {
   const [resetPasswordUser, setResetPasswordUser] = useState<string>('');
   const [newPassword, setNewPassword] = useState('');
 
+  const getHeaders = () => ({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`
+  });
+
   const fetchData = () => {
-    fetch('/api/v1/management/users')
+    fetch('/api/v1/management/users', {
+      headers: getHeaders()
+    })
       .then(res => res.json())
       .then(data => setUsers(data || []))
       .catch(console.error);
-      
-    fetch('/api/v1/management/groups')
+
+    fetch('/api/v1/management/groups', {
+      headers: getHeaders()
+    })
       .then(res => res.json())
       .then(data => setGroups(data || []))
       .catch(console.error);
@@ -32,10 +43,10 @@ export default function Users() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUser.username || !newUser.password) return;
-    
+
     await fetch('/api/v1/management/users', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({
         username: newUser.username,
         password: newUser.password,
@@ -49,10 +60,10 @@ export default function Users() {
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newGroup) return;
-    
+
     await fetch('/api/v1/management/groups', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ name: newGroup })
     });
     setNewGroup('');
@@ -65,7 +76,7 @@ export default function Users() {
 
     await fetch(`/api/v1/management/groups/${encodeURIComponent(userGroupData.groupName)}/users`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ username: userGroupData.username })
     });
     setUserGroupData({ username: '', groupName: '' });
@@ -77,7 +88,8 @@ export default function Users() {
     if (!confirm(`Are you sure you want to delete user "${username}"?`)) return;
 
     await fetch(`/api/v1/management/users/${encodeURIComponent(username)}`, {
-      method: 'DELETE'
+      method: 'DELETE',
+      headers: getHeaders()
     });
     fetchData();
   };
@@ -88,7 +100,7 @@ export default function Users() {
 
     await fetch(`/api/v1/management/users/${encodeURIComponent(editingUser.Username)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({
         scopes: editingUser.Scopes
       })
@@ -103,7 +115,7 @@ export default function Users() {
 
     await fetch(`/api/v1/management/users/${encodeURIComponent(resetPasswordUser)}/reset-password`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ password: newPassword })
     });
     setResetPasswordUser('');

@@ -1,6 +1,7 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle, LogOut, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle, LogOut, ChevronDown, Moon, Sun } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useTheme } from '../contexts/ThemeContext';
 import { useState } from 'react';
 
 const navigation = [
@@ -17,6 +18,7 @@ const navigation = [
 export default function Layout() {
   const location = useLocation();
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [showUserMenu, setShowUserMenu] = useState(false);
 
   const handleLogout = async () => {
@@ -75,7 +77,21 @@ export default function Layout() {
           <h2 className="text-lg font-semibold text-foreground">
             {navigation.find((item) => item.href === location.pathname)?.name || 'Admin Console'}
           </h2>
-          <div className="relative">
+          <div className="flex items-center gap-3">
+            {/* Dark mode toggle */}
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-lg hover:bg-muted/50 transition-colors"
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? (
+                <Sun className="w-5 h-5 text-yellow-500" />
+              ) : (
+                <Moon className="w-5 h-5 text-slate-700" />
+              )}
+            </button>
+
+            <div className="relative">
             <button
               onClick={() => setShowUserMenu(!showUserMenu)}
               className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted/50 transition-colors"
@@ -140,6 +156,7 @@ export default function Layout() {
                 </div>
               </>
             )}
+            </div>
           </div>
         </header>
         <main className="flex-1 overflow-auto p-8 bg-muted/20">
