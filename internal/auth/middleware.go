@@ -3,9 +3,10 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
+
+	"github.com/ryan/ads-registry/internal/logger"
 )
 
 type userContextKey string
@@ -73,11 +74,11 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 			fullRepo = "*"
 		}
 
-		log.Printf("[MIDDLEWARE] Checking authorization: URL=%s fullRepo=%s action=%s", r.URL.Path, fullRepo, action)
+		logger.Debug("Checking authorization: URL=%s fullRepo=%s action=%s", r.URL.Path, fullRepo, action)
 
 		authorized := false
 		for _, access := range claims.Access {
-			log.Printf("[MIDDLEWARE] JWT Access: type=%s name=%s actions=%v", access.Type, access.Name, access.Actions)
+			logger.Debug("JWT Access: type=%s name=%s actions=%v", access.Type, access.Name, access.Actions)
 			
 			// Allow catalog access
 			if r.URL.Path == "/v2/_catalog" && access.Type == "registry" && access.Name == "catalog" {
@@ -100,7 +101,7 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 		}
 
 		if !authorized {
-			log.Printf("[MIDDLEWARE] Authorization DENIED: fullRepo=%s from JWT != expected or action %s not in token", fullRepo, action)
+			logger.Debug("Authorization DENIED: fullRepo=%s from JWT != expected or action %s not in token", fullRepo, action)
 		}
 
 		// For the base check `/v2/` we only need a valid token.
@@ -158,12 +159,12 @@ func (m *Middleware) ProtectAdmin(next http.Handler) http.Handler {
 		}
 
 		if !isAdmin {
-			log.Printf("[ADMIN] Access denied for user %s - requires admin privileges", claims.Subject)
+			logger.Warn("Access denied for user %s - requires admin privileges", claims.Subject)
 			http.Error(w, "Forbidden: admin privileges required", http.StatusForbidden)
 			return
 		}
 
-		log.Printf("[ADMIN] Admin access granted for user %s", claims.Subject)
+		logger.Debug("Admin access granted for user %s", claims.Subject)
 
 		// Set context and continue
 		ctx := context.WithValue(r.Context(), UserContext, *claims)

@@ -96,6 +96,7 @@ type AuthConfig struct {
 }
 
 type LoggingConfig struct {
+	Level         string              `json:"level"` // debug, info, warn, error (default: info)
 	Syslog        SyslogConfig        `json:"syslog"`
 	Elasticsearch ElasticsearchConfig `json:"elasticsearch"`
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/ryan/ads-registry/internal/db/postgres"
 	"github.com/ryan/ads-registry/internal/db/sqlite"
 	"github.com/ryan/ads-registry/internal/health"
+	"github.com/ryan/ads-registry/internal/logger"
 	"github.com/ryan/ads-registry/internal/logging"
 	"github.com/ryan/ads-registry/internal/policy"
 	"github.com/ryan/ads-registry/internal/queue"
@@ -128,6 +129,14 @@ func runServer() {
 			},
 		}
 	}
+
+	// Initialize log level from config
+	logLevel := cfg.Logging.Level
+	if logLevel == "" {
+		logLevel = "info" // default to info
+	}
+	logger.SetLevel(logLevel)
+	logger.Info("Log level set to: %s", logLevel)
 
 	// Initialize enterprise logging
 	logCfg := logging.Config{
