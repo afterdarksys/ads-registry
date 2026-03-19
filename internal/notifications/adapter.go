@@ -33,7 +33,7 @@ func (a *QueueNotificationAdapter) SaveScanResultsToDatabase(ctx context.Context
 }
 
 // convertToScannerReport converts queue.ScanReport to scanner.Report
-func (a *QueueNotificationAdapter) convertToScannerReport(queueReport interface{}) *scanner.Report {
+func (a *QueueNotificationAdapter) convertToScannerReport(_ interface{}) *scanner.Report {
 	// Type assert to get the actual report
 	// The queue package uses the same structure, so we can safely convert
 	type QueueReport struct {

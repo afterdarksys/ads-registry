@@ -329,7 +329,7 @@ spec:
   entryPoints:
   - web
   routes:
-  - match: Host(\`web.local\`)
+  - match: Host(` + "`" + `web.local` + "`" + `)
     kind: Rule
     services:
     - name: web

@@ -268,7 +268,7 @@ func (h *ImagePullSecretHandler) getUserDetails(userID int) (string, string, err
 }
 
 // generateShortLivedToken generates a JWT token with expiration
-func (h *ImagePullSecretHandler) generateShortLivedToken(userID int, username string, ttl time.Duration) (string, time.Time, error) {
+func (h *ImagePullSecretHandler) generateShortLivedToken(_ int, _ string, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().Add(ttl)
 
 	// Generate JWT token (this would use your existing token generator)

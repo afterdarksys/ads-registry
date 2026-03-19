@@ -1,10 +1,7 @@
 package scripting
 
 import (
-	"fmt"
-
 	"go.starlark.net/starlark"
-	"go.starlark.net/starlarkstruct"
 )
 
 // K8sHelpers provides Kubernetes-specific helper functions

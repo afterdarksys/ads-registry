@@ -3,6 +3,7 @@ package notifications
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -247,7 +248,7 @@ func (s *ScanNotificationService) shouldNotify(analysis *ScanAnalysis, prefs *No
 }
 
 // sendEmailNotification sends email notification to owner
-func (s *ScanNotificationService) sendEmailNotification(ctx context.Context, email, digest string, analysis *ScanAnalysis) error {
+func (s *ScanNotificationService) sendEmailNotification(_ context.Context, email, digest string, analysis *ScanAnalysis) error {
 	subject := fmt.Sprintf("[Security Alert] %d vulnerabilities found in image %s", analysis.TotalVulns, digest[:12])
 
 	body := fmt.Sprintf(`
@@ -280,7 +281,7 @@ Vulnerability Summary:
 }
 
 // sendWebhookNotification sends webhook notification
-func (s *ScanNotificationService) sendWebhookNotification(ctx context.Context, webhookURL, digest string, analysis *ScanAnalysis) error {
+func (s *ScanNotificationService) sendWebhookNotification(_ context.Context, webhookURL, digest string, analysis *ScanAnalysis) error {
 	payload := map[string]interface{}{
 		"event":       "image.scan.completed",
 		"digest":      digest,
@@ -297,7 +298,7 @@ func (s *ScanNotificationService) sendWebhookNotification(ctx context.Context, w
 }
 
 // sendSlackNotification sends Slack notification
-func (s *ScanNotificationService) sendSlackNotification(ctx context.Context, slackWebhook, digest string, analysis *ScanAnalysis) error {
+func (s *ScanNotificationService) sendSlackNotification(_ context.Context, slackWebhook, digest string, analysis *ScanAnalysis) error {
 	color := "good"
 	if analysis.CriticalCount > 0 {
 		color = "danger"
@@ -335,7 +336,7 @@ func (s *ScanNotificationService) recordNotificationSent(ctx context.Context, us
 		"notification_type": "scan_results",
 		"vulnerability_count": vulnCount,
 	}
-	metadataJSON, _ := (&scanner.Report{}).MarshalJSON() // placeholder
+	metadataJSON, _ := json.Marshal(metadata)
 
 	_, err := s.db.ExecContext(ctx, query, userID, "notification_sent", "scan", digest, metadataJSON, time.Now())
 	return err

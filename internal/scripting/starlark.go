@@ -3,7 +3,6 @@ package scripting
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
