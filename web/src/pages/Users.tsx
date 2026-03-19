@@ -1,13 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Users as UsersIcon, Shield, Plus, UsersRound } from 'lucide-react';
+import { Users as UsersIcon, Shield, Plus, UsersRound, Trash2, Edit, Key } from 'lucide-react';
 
 export default function Users() {
   const [users, setUsers] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
-  
+
   const [newUser, setNewUser] = useState({ username: '', password: '', scopes: '*' });
   const [newGroup, setNewGroup] = useState('');
   const [userGroupData, setUserGroupData] = useState({ username: '', groupName: '' });
+
+  const [editingUser, setEditingUser] = useState<any>(null);
+  const [resetPasswordUser, setResetPasswordUser] = useState<string>('');
+  const [newPassword, setNewPassword] = useState('');
 
   const fetchData = () => {
     fetch('/api/v1/management/users')
@@ -58,16 +62,53 @@ export default function Users() {
   const handleAddUserToGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userGroupData.username || !userGroupData.groupName) return;
-    
+
     await fetch(`/api/v1/management/groups/${encodeURIComponent(userGroupData.groupName)}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: userGroupData.username })
     });
     setUserGroupData({ username: '', groupName: '' });
-    // In a real app we'd fetch the mapping or alert success
     alert('User added to group successfully');
     fetchData();
+  };
+
+  const handleDeleteUser = async (username: string) => {
+    if (!confirm(`Are you sure you want to delete user "${username}"?`)) return;
+
+    await fetch(`/api/v1/management/users/${encodeURIComponent(username)}`, {
+      method: 'DELETE'
+    });
+    fetchData();
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+
+    await fetch(`/api/v1/management/users/${encodeURIComponent(editingUser.Username)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scopes: editingUser.Scopes
+      })
+    });
+    setEditingUser(null);
+    fetchData();
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetPasswordUser || !newPassword) return;
+
+    await fetch(`/api/v1/management/users/${encodeURIComponent(resetPasswordUser)}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: newPassword })
+    });
+    setResetPasswordUser('');
+    setNewPassword('');
+    alert('Password reset successfully');
   };
 
   return (
@@ -90,14 +131,56 @@ export default function Users() {
                 <div className="p-6 text-center text-muted-foreground">No users found.</div>
               ) : (
                 users.map((user: any) => (
-                  <div key={user.ID} className="p-4 px-6 flex items-center justify-between hover:bg-muted/10 transition-colors">
-                    <div>
-                      <div className="font-medium flex items-center">
-                        {user.Username}
-                        <Shield className="w-3 h-3 ml-2 text-primary opacity-70" />
+                  <div key={user.ID} className="p-4 px-6 hover:bg-muted/10 transition-colors">
+                    {editingUser?.Username === user.Username ? (
+                      <form onSubmit={handleUpdateUser} className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-medium mb-1">Scopes (comma-separated)</label>
+                          <input
+                            value={editingUser.Scopes?.join(', ')}
+                            onChange={e => setEditingUser({...editingUser, Scopes: e.target.value.split(',').map((s: string) => s.trim())})}
+                            className="w-full bg-background border border-border rounded px-2 py-1 text-sm"
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <button type="submit" className="bg-primary text-primary-foreground px-3 py-1 rounded text-sm">Save</button>
+                          <button type="button" onClick={() => setEditingUser(null)} className="bg-secondary px-3 py-1 rounded text-sm">Cancel</button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="font-medium flex items-center">
+                            {user.Username}
+                            <Shield className="w-3 h-3 ml-2 text-primary opacity-70" />
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1 font-mono">Scopes: {user.Scopes?.join(', ')}</div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => setEditingUser(user)}
+                            className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                            title="Edit scopes"
+                          >
+                            <Edit className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setResetPasswordUser(user.Username)}
+                            className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                            title="Reset password"
+                          >
+                            <Key className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(user.Username)}
+                            className="p-1.5 hover:bg-destructive/10 rounded-md text-destructive hover:text-destructive transition-colors"
+                            title="Delete user"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 font-mono">Scopes: {user.Scopes?.join(', ')}</div>
-                    </div>
+                    )}
                   </div>
                 ))
               )}
@@ -174,6 +257,32 @@ export default function Users() {
           </div>
         </div>
       </div>
+
+      {resetPasswordUser && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setResetPasswordUser('')}>
+          <div className="bg-card border border-border rounded-xl shadow-lg p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-4">Reset Password for {resetPasswordUser}</h3>
+            <form onSubmit={handleResetPassword} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">New Password</label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm"
+                  placeholder="Min 8 characters"
+                />
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button type="button" onClick={() => { setResetPasswordUser(''); setNewPassword(''); }} className="px-4 py-2 bg-secondary rounded-md text-sm">Cancel</button>
+                <button type="submit" className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm">Reset Password</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

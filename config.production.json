@@ -30,7 +30,8 @@
         "token_issuer": "ads-registry",
         "token_service": "registry",
         "private_key_path": "",
-        "public_key_path": ""
+        "public_key_path": "",
+        "token_expiration": 259200000000000
     },
     "logging": {
         "syslog": {

@@ -1,0 +1,9 @@
+# Small test batch - critical repos only (no null tags)
+# AfterDark main services
+iad.ocir.io/idd2oizp8xvc/afterdarksys/main-site:latest afterdark.adscr.io:5006/afterdarksys/main-site:latest
+iad.ocir.io/idd2oizp8xvc/letsgoout/api:latest afterdark.adscr.io:5006/letsgoout/api:latest
+iad.ocir.io/idd2oizp8xvc/letsgoout/web:latest afterdark.adscr.io:5006/letsgoout/web:latest
+
+# Key infrastructure
+iad.ocir.io/idd2oizp8xvc/ecosystem-zone:latest afterdark.adscr.io:5006/ecosystem-zone:latest
+iad.ocir.io/idd2oizp8xvc/login-sso:latest afterdark.adscr.io:5006/login-sso:latest

@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/ryan/ads-registry/internal/api/management"
+	tenancyAPI "github.com/ryan/ads-registry/internal/api/tenancy"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
@@ -36,6 +37,7 @@ import (
 	"github.com/ryan/ads-registry/internal/storage/local"
 	"github.com/ryan/ads-registry/internal/storage/oci"
 	"github.com/ryan/ads-registry/internal/storage/s3"
+	"github.com/ryan/ads-registry/internal/tenancy"
 	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/vault"
 	"github.com/ryan/ads-registry/internal/webhooks"
@@ -312,17 +314,51 @@ func runServer() {
 		logger.Info("Compatibility system enabled (Postfix-style client workarounds)")
 	}
 
+	// Initialize multi-tenancy middleware (PostgreSQL only)
+	var tenantMiddleware *tenancy.TenantMiddleware
+	var meteringService *tenancy.MeteringService
+	if cfg.Database.Driver == "postgres" || cfg.Database.Driver == "pgsqllite" {
+		// Get database connection for tenant middleware
+		if pgStore, ok := store.(*postgres.PostgresStore); ok {
+			// Extract base domain from config or environment
+			baseDomain := os.Getenv("REGISTRY_BASE_DOMAIN")
+			if baseDomain == "" {
+				baseDomain = "registry.afterdarksys.com" // Default
+			}
+
+			tenantMiddleware = tenancy.NewTenantMiddleware(
+				pgStore.DB(),
+				baseDomain,
+				false, // Don't require tenant (allow "default" tenant for backward compat)
+			)
+
+			// Initialize usage metering
+			meteringService = tenancy.NewMeteringService(pgStore.DB())
+
+			logger.Info(fmt.Sprintf("Multi-tenancy enabled with base domain: %s", baseDomain))
+		}
+	}
+
 	// Middleware chain (order matters!)
-	// 1. Client detection (early - enriches context)
+	// 1. Tenant resolution (FIRST - resolves tenant from subdomain)
+	if tenantMiddleware != nil {
+		r.Use(tenantMiddleware.Middleware)
+	}
+	// 2. Client detection (early - enriches context)
 	r.Use(compatMiddleware.ClientDetectionMiddleware)
-	// 2. Logging (logs with client info if available)
+	// 3. Logging (logs with client info if available)
 	r.Use(logging.HTTPLoggingMiddleware(logger))
-	// 3. Compatibility workarounds (applies fixes based on detected client)
+	// 4. Bandwidth metering (tracks usage for billing)
+	if meteringService != nil {
+		meteringMiddleware := tenancy.NewBandwidthMeteringMiddleware(meteringService)
+		r.Use(meteringMiddleware.Middleware)
+	}
+	// 5. Compatibility workarounds (applies fixes based on detected client)
 	r.Use(compatMiddleware.CompatibilityMiddleware)
-	// 4. Recovery (catch panics)
+	// 6. Recovery (catch panics)
 	r.Use(middleware.Recoverer)
-	// 5. Rate limiting
-	r.Use(httprate.LimitByIP(100, 1*time.Minute))
+	// 7. Rate limiting (increased to 10000 for OCI migration)
+	r.Use(httprate.LimitByIP(10000, 1*time.Minute))
 
 	// Management & Observability
 	healthHandler := health.NewHandler("1.0.0")
@@ -417,6 +453,11 @@ func runServer() {
 	// 4. Starlark Embedded Automation
 	starEng := automation.NewEngine()
 
+	// 5. Starlark Cron Scheduler (for automated tasks like upstream token refresh)
+	cronScheduler := automation.NewCronScheduler(starEng, "scripts")
+	cronScheduler.Start()
+	logger.Info("Starlark cron scheduler started")
+
 	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy
 	v2api.Register(r)
 
@@ -424,15 +465,33 @@ func runServer() {
 	managementRouter := management.NewRouter(store, tokenService, enf, starEng)
 	managementRouter.Register(r)
 
+	// Multi-Tenancy Management API (PostgreSQL only)
+	if cfg.Database.Driver == "postgres" || cfg.Database.Driver == "pgsqllite" {
+		if pgStore, ok := store.(*postgres.PostgresStore); ok {
+			tenancyRouter := tenancyAPI.NewRouter(pgStore.DB())
+			tenancyRouter.RegisterRoutes(r)
+
+			// OIDC Authentication endpoints
+			baseURL := os.Getenv("REGISTRY_BASE_URL")
+			if baseURL == "" {
+				baseURL = "https://registry.afterdarksys.com"
+			}
+			oidcAuthHandler := tenancyAPI.NewOIDCAuthHandler(pgStore.DB(), store, tokenService, baseURL)
+			oidcAuthHandler.RegisterRoutes(r)
+
+			logger.Info("Multi-tenancy management API enabled")
+		}
+	}
+
 	// React SPA Server
 	distDir := "web/dist"
 	fs := http.FileServer(http.Dir(distDir))
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := os.Stat(filepath.Join(distDir, r.URL.Path)); os.IsNotExist(err) {
-			http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
+	r.HandleFunc("/*", func(w http.ResponseWriter, req *http.Request) {
+		if _, err := os.Stat(filepath.Join(distDir, req.URL.Path)); os.IsNotExist(err) {
+			http.ServeFile(w, req, filepath.Join(distDir, "index.html"))
 			return
 		}
-		fs.ServeHTTP(w, r)
+		fs.ServeHTTP(w, req)
 	})
 
 	// 4. Server
@@ -479,6 +538,10 @@ func runServer() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Warning("Received shutdown signal, shutting down server...")
+
+	// Stop cron scheduler
+	cronScheduler.Stop()
+	logger.Info("Cron scheduler stopped")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

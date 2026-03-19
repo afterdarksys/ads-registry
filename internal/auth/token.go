@@ -16,6 +16,7 @@ type TokenService struct {
 	service    string
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
+	Expiration time.Duration
 }
 
 type Claims struct {
@@ -76,6 +77,7 @@ func NewTokenService(cfg config.AuthConfig) (*TokenService, error) {
 		service:    cfg.TokenService,
 		privateKey: privateKey,
 		publicKey:  publicKey,
+		Expiration: cfg.TokenExpiration,
 	}, nil
 }
 
@@ -89,7 +91,7 @@ func (t *TokenService) GenerateToken(subject string, access []AccessEntry) (stri
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    t.issuer,
 			Subject:   subject,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(t.Expiration)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 		},

@@ -29,6 +29,7 @@ type Store interface {
 	// Scanning
 	SaveScanReport(ctx context.Context, digest string, scanner string, data []byte) error
 	GetScanReport(ctx context.Context, digest string, scanner string) ([]byte, error)
+	ListScanReports(ctx context.Context) ([]ScanReport, error)
 
 	// Users/Auth
 	GetUserByToken(ctx context.Context, token string) (*User, error)
@@ -36,6 +37,9 @@ type Store interface {
 	AuthenticateUser(ctx context.Context, username, password string) (*User, error)
 	CreateUser(ctx context.Context, username, passwordHash string, scopes []string) error
 	ListUsers(ctx context.Context) ([]User, error)
+	DeleteUser(ctx context.Context, username string) error
+	UpdateUser(ctx context.Context, username string, scopes []string) error
+	UpdateUserPassword(ctx context.Context, username, passwordHash string) error
 
 	// Groups and Quotas
 	CreateGroup(ctx context.Context, name string) error
@@ -45,6 +49,17 @@ type Store interface {
 	UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error
 	ListGroups(ctx context.Context) ([]Group, error)
 	ListQuotas(ctx context.Context) ([]Quota, error)
+
+	// Upstream Registries
+	GetUpstream(ctx context.Context, id int) (map[string]interface{}, error)
+	GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error)
+	ListUpstreams(ctx context.Context) ([]map[string]interface{}, error)
+
+	// OCI Artifacts (Referrers API, Helm charts, etc.)
+	SetArtifactMetadata(ctx context.Context, metadata *ArtifactMetadata) error
+	GetArtifactMetadata(ctx context.Context, digest string) (*ArtifactMetadata, error)
+	ListReferrers(ctx context.Context, subjectDigest string, artifactType string) ([]ReferrerDescriptor, error)
+	ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]ArtifactDescriptor, error)
 
 	Close() error
 }
@@ -80,4 +95,39 @@ type ManifestRecord struct {
 	Repo      string
 	Reference string
 	Digest    string
+}
+
+// ArtifactMetadata represents OCI artifact metadata
+type ArtifactMetadata struct {
+	Digest         string
+	ArtifactType   string
+	SubjectDigest  string
+	ChartName      string
+	ChartVersion   string
+	AppVersion     string
+	MetadataJSON   string
+}
+
+// ReferrerDescriptor describes an artifact that refers to a subject
+type ReferrerDescriptor struct {
+	Digest       string
+	MediaType    string
+	ArtifactType string
+	Size         int64
+	Annotations  map[string]string
+}
+
+// ArtifactDescriptor describes an OCI artifact
+type ArtifactDescriptor struct {
+	Digest       string
+	Namespace    string
+	Repo         string
+	ArtifactType string
+	MediaType    string
+	Size         int64
+	CreatedAt    string
+	// Helm-specific fields
+	ChartName    string
+	ChartVersion string
+	AppVersion   string
 }

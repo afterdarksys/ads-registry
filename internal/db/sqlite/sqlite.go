@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -422,6 +423,58 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, username, passwordHash str
 	return err
 }
 
+func (s *SQLiteStore) DeleteUser(ctx context.Context, username string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM users WHERE username = ?", username)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateUser(ctx context.Context, username string, scopes []string) error {
+	scopesJSON := strings.Join(scopes, ",")
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE users SET scopes = ? WHERE username = ?",
+		scopesJSON, username,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE users SET token_hash = ? WHERE username = ?",
+		passwordHash, username,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLiteStore) SaveScanReport(ctx context.Context, digest string, scanner string, data []byte) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO scan_reports (digest, scanner, data) 
@@ -441,6 +494,29 @@ func (s *SQLiteStore) GetScanReport(ctx context.Context, digest string, scanner 
 		return nil, db.ErrNotFound
 	}
 	return data, err
+}
+
+func (s *SQLiteStore) ListScanReports(ctx context.Context) ([]db.ScanReport, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT digest, scanner, data
+		FROM scan_reports
+		ORDER BY created_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reports []db.ScanReport
+	for rows.Next() {
+		var r db.ScanReport
+		if err := rows.Scan(&r.Digest, &r.Scanner, &r.Data); err != nil {
+			return nil, err
+		}
+		reports = append(reports, r)
+	}
+	return reports, rows.Err()
 }
 
 // Helper functions for password hashing
@@ -577,6 +653,46 @@ func (s *SQLiteStore) UpdateQuotaUsage(ctx context.Context, namespace string, si
 		UPDATE quotas SET used_bytes = used_bytes + ? WHERE namespace_id = ?
 	`, sizeDelta, nsID)
 	return err
+}
+
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+// Upstream Registries (not implemented in SQLite - use PostgreSQL)
+// --------------------------------------------------------------------------------
+
+func (s *SQLiteStore) GetUpstream(ctx context.Context, id int) (map[string]interface{}, error) {
+	return nil, errors.New("upstream registries not supported in SQLite - use PostgreSQL")
+}
+
+func (s *SQLiteStore) GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error) {
+	return nil, errors.New("upstream registries not supported in SQLite - use PostgreSQL")
+}
+
+func (s *SQLiteStore) ListUpstreams(ctx context.Context) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
+
+// --------------------------------------------------------------------------------
+// OCI Artifacts (limited support in SQLite - use PostgreSQL for full features)
+// --------------------------------------------------------------------------------
+
+func (s *SQLiteStore) SetArtifactMetadata(ctx context.Context, metadata *db.ArtifactMetadata) error {
+	// Basic stub - SQLite has limited artifact support
+	return nil
+}
+
+func (s *SQLiteStore) GetArtifactMetadata(ctx context.Context, digest string) (*db.ArtifactMetadata, error) {
+	return nil, db.ErrNotFound
+}
+
+func (s *SQLiteStore) ListReferrers(ctx context.Context, subjectDigest string, artifactType string) ([]db.ReferrerDescriptor, error) {
+	// Return empty list for SQLite
+	return []db.ReferrerDescriptor{}, nil
+}
+
+func (s *SQLiteStore) ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]db.ArtifactDescriptor, error) {
+	// Return empty list for SQLite
+	return []db.ArtifactDescriptor{}, nil
 }
 
 // --------------------------------------------------------------------------------

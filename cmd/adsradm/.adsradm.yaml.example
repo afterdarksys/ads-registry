@@ -1,0 +1,17 @@
+# ADS Registry Remote Administration Configuration
+# Copy this file to ~/.adsradm.yaml and configure your settings
+
+# Registry API URL (required)
+# This should be the base URL of your ADS Registry instance
+url: https://registry.example.com
+
+# Admin authentication token (required)
+# Get this token by:
+# 1. Creating an admin user: ads-registry create-user admin --scopes=admin
+# 2. Authenticating: curl -X POST https://registry.example.com/v2/token \
+#                     -d '{"username":"admin","password":"your-password"}'
+token: ""
+
+# Alternative: Set via environment variables
+# export ADSRADM_URL=https://registry.example.com
+# export ADSRADM_TOKEN=your-admin-token

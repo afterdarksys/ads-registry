@@ -88,10 +88,11 @@ type OCIStore struct {
 }
 
 type AuthConfig struct {
-	TokenIssuer  string `json:"token_issuer"`
-	TokenService string `json:"token_service"`
-	PrivateKey   string `json:"private_key_path"`
-	PublicKey    string `json:"public_key_path"`
+	TokenIssuer     string        `json:"token_issuer"`
+	TokenService    string        `json:"token_service"`
+	PrivateKey      string        `json:"private_key_path"`
+	PublicKey       string        `json:"public_key_path"`
+	TokenExpiration time.Duration `json:"token_expiration"` // Duration before tokens expire (default: 24h)
 }
 
 type LoggingConfig struct {
@@ -311,6 +312,11 @@ func LoadFile(path string) (*Config, error) {
 		if cfg.Redis.TTL.Policy == 0 {
 			cfg.Redis.TTL.Policy = 300 // 5 minutes
 		}
+	}
+
+	// Auth defaults
+	if cfg.Auth.TokenExpiration == 0 {
+		cfg.Auth.TokenExpiration = 24 * time.Hour // Default 24 hours
 	}
 
 	// Compatibility defaults

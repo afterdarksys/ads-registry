@@ -136,6 +136,10 @@ func (s *CachedStore) SaveScanReport(ctx context.Context, digest string, scanner
 	return nil
 }
 
+func (s *CachedStore) ListScanReports(ctx context.Context) ([]db.ScanReport, error) {
+	return s.db.ListScanReports(ctx)
+}
+
 // Pass-through methods (delegate to underlying db.Store)
 
 func (s *CachedStore) CreateNamespace(ctx context.Context, name string) error {
@@ -210,12 +214,53 @@ func (s *CachedStore) ListUsers(ctx context.Context) ([]db.User, error) {
 	return s.db.ListUsers(ctx)
 }
 
+func (s *CachedStore) DeleteUser(ctx context.Context, username string) error {
+	return s.db.DeleteUser(ctx, username)
+}
+
+func (s *CachedStore) UpdateUser(ctx context.Context, username string, scopes []string) error {
+	return s.db.UpdateUser(ctx, username, scopes)
+}
+
+func (s *CachedStore) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
+	return s.db.UpdateUserPassword(ctx, username, passwordHash)
+}
+
 func (s *CachedStore) ListGroups(ctx context.Context) ([]db.Group, error) {
 	return s.db.ListGroups(ctx)
 }
 
 func (s *CachedStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
 	return s.db.ListQuotas(ctx)
+}
+
+func (s *CachedStore) GetUpstream(ctx context.Context, id int) (map[string]interface{}, error) {
+	return s.db.GetUpstream(ctx, id)
+}
+
+func (s *CachedStore) GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error) {
+	return s.db.GetUpstreamByName(ctx, name)
+}
+
+func (s *CachedStore) ListUpstreams(ctx context.Context) ([]map[string]interface{}, error) {
+	return s.db.ListUpstreams(ctx)
+}
+
+// OCI Artifacts - pass-through (no caching for now)
+func (s *CachedStore) SetArtifactMetadata(ctx context.Context, metadata *db.ArtifactMetadata) error {
+	return s.db.SetArtifactMetadata(ctx, metadata)
+}
+
+func (s *CachedStore) GetArtifactMetadata(ctx context.Context, digest string) (*db.ArtifactMetadata, error) {
+	return s.db.GetArtifactMetadata(ctx, digest)
+}
+
+func (s *CachedStore) ListReferrers(ctx context.Context, subjectDigest string, artifactType string) ([]db.ReferrerDescriptor, error) {
+	return s.db.ListReferrers(ctx, subjectDigest, artifactType)
+}
+
+func (s *CachedStore) ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]db.ArtifactDescriptor, error) {
+	return s.db.ListArtifactsByType(ctx, artifactType, limit)
 }
 
 func (s *CachedStore) Close() error {

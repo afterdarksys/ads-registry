@@ -1,10 +1,12 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal } from 'lucide-react';
+import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle } from 'lucide-react';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Users & Groups', href: '/users', icon: Users },
   { name: 'Repositories', href: '/repositories', icon: Server },
+  { name: 'Upstreams', href: '/upstreams', icon: Cloud },
+  { name: 'Vulnerabilities', href: '/vulnerabilities', icon: AlertTriangle },
   { name: 'Security Policies', href: '/policies', icon: Shield },
   { name: 'Automation Scripts', href: '/scripts', icon: FileTerminal },
   { name: 'Settings', href: '/settings', icon: Settings },

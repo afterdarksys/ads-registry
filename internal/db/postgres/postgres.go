@@ -17,6 +17,11 @@ type PostgresStore struct {
 	db *sql.DB
 }
 
+// DB returns the underlying database connection
+func (s *PostgresStore) DB() *sql.DB {
+	return s.db
+}
+
 func New(cfg config.DatabaseConfig) (*PostgresStore, error) {
 	database, err := sql.Open("postgres", cfg.DSN)
 	if err != nil {
@@ -393,6 +398,29 @@ func (s *PostgresStore) GetScanReport(ctx context.Context, digest string, scanne
 	return data, err
 }
 
+func (s *PostgresStore) ListScanReports(ctx context.Context) ([]db.ScanReport, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT digest, scanner, data
+		FROM scan_reports
+		ORDER BY created_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reports []db.ScanReport
+	for rows.Next() {
+		var r db.ScanReport
+		if err := rows.Scan(&r.Digest, &r.Scanner, &r.Data); err != nil {
+			return nil, err
+		}
+		reports = append(reports, r)
+	}
+	return reports, rows.Err()
+}
+
 func (s *PostgresStore) GetUserByUsername(ctx context.Context, username string) (*db.User, error) {
 	var u db.User
 	var scopes string
@@ -452,6 +480,58 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]db.User, error) {
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM users WHERE username = $1", username)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateUser(ctx context.Context, username string, scopes []string) error {
+	scopesJSON := strings.Join(scopes, ",")
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE users SET scopes = $1 WHERE username = $2",
+		scopesJSON, username,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE users SET token_hash = $1 WHERE username = $2",
+		passwordHash, username,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
 }
 
 // Helper functions for password hashing
@@ -711,6 +791,153 @@ func (s *PostgresStore) UpdateUpstreamToken(ctx context.Context, id int, token s
 func (s *PostgresStore) DeleteUpstream(ctx context.Context, id int) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM upstream_registries WHERE id = $1", id)
 	return err
+}
+
+// --------------------------------------------------------------------------------
+// OCI Artifacts (Referrers API, Helm Charts, etc.)
+// --------------------------------------------------------------------------------
+
+// SetArtifactMetadata stores metadata for an OCI artifact
+func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.ArtifactMetadata) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO artifact_metadata (digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (digest) DO UPDATE
+		SET artifact_type = $2, subject_digest = $3, chart_name = $4, chart_version = $5, app_version = $6, metadata_json = $7, updated_at = CURRENT_TIMESTAMP
+	`, metadata.Digest, metadata.ArtifactType, metadata.SubjectDigest, metadata.ChartName, metadata.ChartVersion, metadata.AppVersion, metadata.MetadataJSON)
+
+	// Also update the manifests table for easier querying
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE manifests
+			SET artifact_type = $1, subject_digest = $2
+			WHERE digest = $3
+		`, metadata.ArtifactType, metadata.SubjectDigest, metadata.Digest)
+	}
+
+	return err
+}
+
+// GetArtifactMetadata retrieves metadata for an OCI artifact
+func (s *PostgresStore) GetArtifactMetadata(ctx context.Context, digest string) (*db.ArtifactMetadata, error) {
+	var metadata db.ArtifactMetadata
+	var chartName, chartVersion, appVersion, metadataJSON, subjectDigest sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json
+		FROM artifact_metadata
+		WHERE digest = $1
+	`, digest).Scan(&metadata.Digest, &metadata.ArtifactType, &subjectDigest, &chartName, &chartVersion, &appVersion, &metadataJSON)
+
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	metadata.SubjectDigest = subjectDigest.String
+	metadata.ChartName = chartName.String
+	metadata.ChartVersion = chartVersion.String
+	metadata.AppVersion = appVersion.String
+	metadata.MetadataJSON = metadataJSON.String
+
+	return &metadata, nil
+}
+
+// ListReferrers implements the OCI Referrers API
+// Returns all artifacts that reference the given subject digest
+func (s *PostgresStore) ListReferrers(ctx context.Context, subjectDigest string, artifactType string) ([]db.ReferrerDescriptor, error) {
+	query := `
+		SELECT m.digest, m.media_type, COALESCE(m.artifact_type, '') as artifact_type, m.size
+		FROM manifests m
+		WHERE m.subject_digest = $1
+	`
+	args := []interface{}{subjectDigest}
+
+	if artifactType != "" {
+		query += " AND m.artifact_type = $2"
+		args = append(args, artifactType)
+	}
+
+	query += " ORDER BY m.created_at DESC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var referrers []db.ReferrerDescriptor
+	for rows.Next() {
+		var ref db.ReferrerDescriptor
+		if err := rows.Scan(&ref.Digest, &ref.MediaType, &ref.ArtifactType, &ref.Size); err != nil {
+			return nil, err
+		}
+		referrers = append(referrers, ref)
+	}
+
+	return referrers, rows.Err()
+}
+
+// ListArtifactsByType lists all artifacts of a specific type
+func (s *PostgresStore) ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]db.ArtifactDescriptor, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			m.digest,
+			n.name as namespace,
+			r.name as repo,
+			m.artifact_type,
+			m.media_type,
+			m.size,
+			m.created_at,
+			COALESCE(am.chart_name, ''),
+			COALESCE(am.chart_version, ''),
+			COALESCE(am.app_version, '')
+		FROM manifests m
+		INNER JOIN repositories r ON m.repo_id = r.id
+		INNER JOIN namespaces n ON r.namespace_id = n.id
+		LEFT JOIN artifact_metadata am ON m.digest = am.digest
+		WHERE m.artifact_type = $1
+		ORDER BY m.created_at DESC
+		LIMIT $2
+	`, artifactType, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []db.ArtifactDescriptor
+	for rows.Next() {
+		var artifact db.ArtifactDescriptor
+		var createdAt time.Time
+
+		err := rows.Scan(
+			&artifact.Digest,
+			&artifact.Namespace,
+			&artifact.Repo,
+			&artifact.ArtifactType,
+			&artifact.MediaType,
+			&artifact.Size,
+			&createdAt,
+			&artifact.ChartName,
+			&artifact.ChartVersion,
+			&artifact.AppVersion,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		artifact.CreatedAt = createdAt.Format(time.RFC3339)
+		artifacts = append(artifacts, artifact)
+	}
+
+	return artifacts, rows.Err()
 }
 
 // --------------------------------------------------------------------------------

@@ -24,6 +24,7 @@ func NewHandler(ts *TokenService, dbStore db.Store) *Handler {
 
 func (h *Handler) Register(mux chi.Router) {
 	mux.Get("/auth/token", h.tokenHandler)
+	mux.Post("/auth/refresh", h.refreshHandler)
 }
 
 func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
@@ -116,7 +117,44 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"token":        token,
 		"access_token": token, // For older clients
-		"expires_in":   3600,
+		"expires_in":   int(h.tokenService.Expiration.Seconds()),
+	})
+}
+
+func (h *Handler) refreshHandler(w http.ResponseWriter, req *http.Request) {
+	// Extract Bearer token from Authorization header
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "Missing Authorization header", http.StatusUnauthorized)
+		return
+	}
+
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	if tokenString == authHeader {
+		http.Error(w, "Invalid Authorization header format", http.StatusUnauthorized)
+		return
+	}
+
+	// Parse and validate the existing token
+	claims, err := h.tokenService.ParseToken(tokenString)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	// Generate a new token with the same access grants
+	newToken, err := h.tokenService.GenerateToken(claims.Subject, claims.Access)
+	if err != nil {
+		http.Error(w, "Failed to generate new token", http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with the new token
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":        newToken,
+		"access_token": newToken,
+		"expires_in":   int(h.tokenService.Expiration.Seconds()),
 	})
 }
 
