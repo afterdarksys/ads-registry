@@ -63,6 +63,15 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 	qScope := req.URL.Query().Get("scope")
 	var grantedAccess []AccessEntry
 
+	// Check if user has wildcard admin scope
+	hasWildcard := false
+	for _, userScope := range dbUser.Scopes {
+		if userScope == "*" {
+			hasWildcard = true
+			break
+		}
+	}
+
 	if qScope != "" {
 		parts := strings.Split(qScope, ":")
 		if len(parts) >= 3 {
@@ -103,6 +112,13 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 				Actions: actions,
 			})
 		}
+	} else if hasWildcard {
+		// No scope requested, but user has wildcard - grant admin access
+		grantedAccess = append(grantedAccess, AccessEntry{
+			Type:    "repository",
+			Name:    "*",
+			Actions: []string{"*"},
+		})
 	}
 
 	// 4. Generate JWT

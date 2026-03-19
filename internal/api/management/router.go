@@ -59,8 +59,8 @@ func (r *Router) Register(mux chi.Router) {
 
 		// Repositories
 		api.Get("/repositories", r.listRepositories)
-		api.Get("/repositories/{repo}/tags", r.listTags)
-		api.Get("/repositories/{repo}/manifests", r.listManifestsForRepo)
+		api.Get("/repositories/{repo...}/tags", r.listTags)
+		api.Get("/repositories/{repo...}/manifests", r.listManifestsForRepo)
 
 		// Upstream Registries
 		api.Get("/upstreams", r.listUpstreams)
@@ -346,7 +346,9 @@ func (r *Router) listUpstreams(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) listTags(w http.ResponseWriter, req *http.Request) {
-	repo := chi.URLParam(req, "repo")
+	// Extract repo from URL path: /api/v1/management/repositories/{repo}/tags
+	repo := strings.TrimPrefix(req.URL.Path, "/api/v1/management/repositories/")
+	repo = strings.TrimSuffix(repo, "/tags")
 	if repo == "" {
 		http.Error(w, "repo parameter is required", http.StatusBadRequest)
 		return
@@ -361,7 +363,9 @@ func (r *Router) listTags(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) listManifestsForRepo(w http.ResponseWriter, req *http.Request) {
-	repo := chi.URLParam(req, "repo")
+	// Extract repo from URL path: /api/v1/management/repositories/{repo}/manifests
+	repo := strings.TrimPrefix(req.URL.Path, "/api/v1/management/repositories/")
+	repo = strings.TrimSuffix(repo, "/manifests")
 	if repo == "" {
 		http.Error(w, "repo parameter is required", http.StatusBadRequest)
 		return
