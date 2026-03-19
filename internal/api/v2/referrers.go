@@ -38,16 +38,12 @@ import (
 //     ]
 //   }
 func (r *Router) getReferrers(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
+	// Extract repository path components using the custom router context extractor
+	fullRepo, _ := getRepoContext(req)
 	digest := chi.URLParam(req, "digest")
 
 	// Optional filter by artifact type
 	artifactType := req.URL.Query().Get("artifactType")
-
-	fullRepo := getFullRepo(org, ns, repo)
 	log.Printf("[REFERRERS] GET %s referrers for %s (artifactType=%s)", fullRepo, digest, artifactType)
 
 	// Get referrers from database
@@ -98,14 +94,14 @@ func (r *Router) getReferrers(w http.ResponseWriter, req *http.Request) {
 	log.Printf("[REFERRERS] Returned %d referrers for %s", len(manifests), digest)
 }
 
-// listArtifacts provides a custom endpoint to list artifacts by type
+// ListArtifacts provides a custom endpoint to list artifacts by type
 // GET /api/v2/artifacts?type={artifactType}&limit={limit}
 //
 // Examples:
 //   GET /api/v2/artifacts?type=application/vnd.cncf.helm.chart.content.v1.tar%2Bgzip
 //   GET /api/v2/artifacts?type=application/vnd.dev.cosign.simplesigning.v1%2Bjson
 //   GET /api/v2/artifacts?type=application/vnd.cyclonedx%2Bjson
-func (r *Router) listArtifacts(w http.ResponseWriter, req *http.Request) {
+func (r *Router) ListArtifacts(w http.ResponseWriter, req *http.Request) {
 	artifactType := req.URL.Query().Get("type")
 	if artifactType == "" {
 		http.Error(w, "artifactType query parameter is required", http.StatusBadRequest)

@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-
-	"github.com/go-chi/chi/v5"
 )
 
 type userContextKey string
@@ -52,28 +50,30 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 		// Validation of action -> scope
 		action := getRequiredAction(r)
 
-		// Extract repository path components
-		org := chi.URLParam(r, "org")
-		namespace := chi.URLParam(r, "namespace")
-		repo := chi.URLParam(r, "repo")
+		// Extract repository path directly from URL (same approach as handlers)
+		// Strip endpoint suffixes like /blobs/, /manifests/, /tags/, /referrers/
+		endpointPrefixes := []string{
+			"/blobs/",
+			"/manifests/",
+			"/tags/",
+			"/referrers/",
+		}
 
-		// Build full repository path based on available params
-		var fullRepo string
-		if org != "" && namespace != "" && repo != "" {
-			// Three-level: org/namespace/repo
-			fullRepo = org + "/" + namespace + "/" + repo
-		} else if namespace != "" && repo != "" {
-			// Two-level: namespace/repo
-			fullRepo = namespace + "/" + repo
-		} else if repo != "" {
-			// Single-level: repo
-			fullRepo = repo
-		} else {
-			// Fallback for routes that don't have repo params (like _catalog)
+		cleanPath := r.URL.Path
+		for _, prefix := range endpointPrefixes {
+			if idx := strings.Index(cleanPath, prefix); idx != -1 {
+				cleanPath = cleanPath[:idx]
+				break
+			}
+		}
+
+		// Remove /v2/ prefix to get full repository path
+		fullRepo := strings.TrimPrefix(cleanPath, "/v2/")
+		if fullRepo == "" || fullRepo == "/" {
 			fullRepo = "*"
 		}
 
-		log.Printf("[MIDDLEWARE] Checking authorization: URL=%s org=%s namespace=%s repo=%s fullRepo=%s action=%s", r.URL.Path, org, namespace, repo, fullRepo, action)
+		log.Printf("[MIDDLEWARE] Checking authorization: URL=%s fullRepo=%s action=%s", r.URL.Path, fullRepo, action)
 
 		authorized := false
 		for _, access := range claims.Access {

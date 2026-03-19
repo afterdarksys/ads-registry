@@ -75,41 +75,86 @@ func (r *Router) Register(mux chi.Router) {
 			catalogCtx.Get("/", r.getCatalog)
 		})
 
-		// Define route handlers for both single-level and multi-level repos
-		setupRepoRoutes := func(repoCtx chi.Router) {
-			// 1. First, check Auth JWT Bearer Token scopes
-			repoCtx.Use(r.authMid.Protect)
+		// CRITICAL FIX: Register routes in REVERSE order (most specific FIRST)
+		// Chi router has a known limitation: when multiple patterns match the same request,
+		// it uses the pattern with the MOST path parameters.
+		//
+		// For example, /v2/tokenworx/blobs/uploads/ would match:
+		// - Pattern /{repo}/blobs/uploads/ with repo=tokenworx (1 param) ✓ CORRECT
+		// - Pattern /{namespace}/{repo}/blobs/uploads/ with namespace=tokenworx, repo=blobs (2 params) ✗ WRONG
+		//
+		// Chi would choose the 2-param pattern because it's "more specific", even though it's incorrect.
+		//
+		// Solution: Register most-specific (most params) routes FIRST, so chi finds them first during traversal
 
-			// 2. Second, invoke the CEL engine to verify custom enterprise admission rules
+		api.Group(func(repoGroup chi.Router) {
+			repoGroup.Use(r.authMid.Protect)
+
 			// DISABLED for initial testing - uncomment to enable policy enforcement
 			// if r.enforcer != nil {
-			// 	repoCtx.Use(r.enforcer.Protect)
+			// 	repoGroup.Use(r.enforcer.Protect)
 			// }
 
-			// Tags
-			repoCtx.Get("/tags/list", r.getTags)
+			// FIVE-level repository (register FIRST - most specific)
+			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/tags/list", r.getTags)
+			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Head("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Put("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
+			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
+			repoGroup.Head("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
+			repoGroup.Post("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Patch("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
+			repoGroup.Put("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
-			// Manifests
-			repoCtx.Get("/manifests/{reference}", r.getManifest)
-			repoCtx.Head("/manifests/{reference}", r.getManifest)
-			repoCtx.Put("/manifests/{reference}", r.putManifest)
+			// FOUR-level repository
+			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/tags/list", r.getTags)
+			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Head("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Put("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
+			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
+			repoGroup.Head("/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
+			repoGroup.Post("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Patch("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
+			repoGroup.Put("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
-			// OCI Referrers API
-			repoCtx.Get("/referrers/{digest}", r.getReferrers)
+			// THREE-level repository
+			repoGroup.Get("/{org}/{namespace}/{repo}/tags/list", r.getTags)
+			repoGroup.Get("/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Head("/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Put("/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Get("/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
+			repoGroup.Get("/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
+			repoGroup.Head("/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
+			repoGroup.Post("/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Patch("/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
+			repoGroup.Put("/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
-			// Blobs
-			repoCtx.Get("/blobs/{digest}", r.getBlob)
-			repoCtx.Head("/blobs/{digest}", r.headBlob)
+			// TWO-level repository
+			repoGroup.Get("/{namespace}/{repo}/tags/list", r.getTags)
+			repoGroup.Get("/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Head("/{namespace}/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Put("/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Get("/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
+			repoGroup.Get("/{namespace}/{repo}/blobs/{digest}", r.getBlob)
+			repoGroup.Head("/{namespace}/{repo}/blobs/{digest}", r.headBlob)
+			repoGroup.Post("/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Patch("/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
+			repoGroup.Put("/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
-			// Uploads
-			repoCtx.Post("/blobs/uploads/", r.startUpload)
-			repoCtx.Patch("/blobs/uploads/{uuid}", r.patchUpload)
-			repoCtx.Put("/blobs/uploads/{uuid}", r.putUpload)
-		}
-
-		// Use wildcard to capture repository path, then parse in handlers
-		// This avoids chi router ambiguity with multi-level paths
-		api.Route("/{repoPath...}", setupRepoRoutes)
+			// SINGLE-level repository (register LAST - least specific)
+			repoGroup.Get("/{repo}/tags/list", r.getTags)
+			repoGroup.Get("/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Head("/{repo}/manifests/{reference}", r.getManifest)
+			repoGroup.Put("/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Get("/{repo}/referrers/{digest}", r.getReferrers)
+			repoGroup.Get("/{repo}/blobs/{digest}", r.getBlob)
+			repoGroup.Head("/{repo}/blobs/{digest}", r.headBlob)
+			repoGroup.Post("/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Patch("/{repo}/blobs/uploads/{uuid}", r.patchUpload)
+			repoGroup.Put("/{repo}/blobs/uploads/{uuid}", r.putUpload)
+		})
 	})
 }
 
@@ -126,12 +171,11 @@ func (r *Router) baseCheck(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// parseRepoPath extracts namespace and repo from the repository path
-// It strips endpoint suffixes like /blobs/uploads/, /tags/list, etc.
-// Supports both single-level (nginx) and multi-level (library/nginx)
-func parseRepoPath(repoPath string) (namespace string, repo string) {
+// getRepoContext extracts the full repository path and namespace for quota/proxy tracking
+// It safely strips endpoint suffixes like /blobs/uploads/, /tags/list, etc.
+// because Chi route matching might not provide the exact full path securely as a parameter in all scenarios.
+func getRepoContext(req *http.Request) (fullRepo string, quotaNs string) {
 	// Remove endpoint suffixes
-	// Known endpoints: /blobs/*, /manifests/*, /tags/list, /referrers/*
 	endpointPrefixes := []string{
 		"/blobs/",
 		"/manifests/",
@@ -139,47 +183,30 @@ func parseRepoPath(repoPath string) (namespace string, repo string) {
 		"/referrers/",
 	}
 
-	cleanPath := repoPath
+	cleanPath := req.URL.Path
 	for _, prefix := range endpointPrefixes {
-		if idx := strings.Index(repoPath, prefix); idx != -1 {
-			cleanPath = repoPath[:idx]
+		if idx := strings.Index(cleanPath, prefix); idx != -1 {
+			cleanPath = cleanPath[:idx]
 			break
 		}
 	}
 
-	// Split by "/" to get path components
-	parts := strings.Split(cleanPath, "/")
+	// Trim the base /v2/ API version routing prefix to get the full multi-level repo name
+	fullRepo = strings.TrimPrefix(cleanPath, "/v2/")
 
-	switch len(parts) {
-	case 0:
-		return "", ""
-	case 1:
-		// Single-level: nginx → namespace="", repo="nginx"
-		return "", parts[0]
-	default:
-		// Multi-level: library/nginx → namespace="library", repo="nginx"
-		// Or deeper: org/team/app → namespace="org/team", repo="app"
-		namespace = strings.Join(parts[:len(parts)-1], "/")
-		repo = parts[len(parts)-1]
-		return namespace, repo
+	// Extract the root-most organization/namespace for Quota and Upstream Proxy
+	parts := strings.Split(fullRepo, "/")
+	if len(parts) >= 2 {
+		quotaNs = parts[0]
+	} else {
+		quotaNs = ""
 	}
+
+	return fullRepo, quotaNs
 }
 
-func getPath(ns, repo, digest string) string {
-	if ns == "" {
-		return filepath.Join(repo, digest)
-	}
-	return filepath.Join(ns, repo, digest)
-}
-
-func getFullRepo(org, ns, repo string) string {
-	if org != "" && ns != "" && repo != "" {
-		return org + "/" + ns + "/" + repo
-	}
-	if ns != "" && repo != "" {
-		return ns + "/" + repo
-	}
-	return repo
+func getPath(fullRepo, digest string) string {
+	return filepath.Join(fullRepo, digest)
 }
 
 func (r *Router) getCatalog(w http.ResponseWriter, req *http.Request) {
@@ -216,23 +243,18 @@ func (r *Router) getCatalog(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) getTags(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 
 	nStr := req.URL.Query().Get("n")
 	last := req.URL.Query().Get("last")
 
 	// Check if this is an upstream registry request
-	upstreamNs := ns
-	if org != "" {
-		upstreamNs = org
-	}
+	upstreamNs := quotaNs
 	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), upstreamNs) {
+		repoName := filepath.Base(fullRepo)
 		log.Printf("[UPSTREAM PROXY] Proxying tags list request: %s", fullRepo)
-		upstreamResp, err := r.upstreamProxy.ProxyTagsList(req.Context(), upstreamNs, repo)
+		upstreamResp, err := r.upstreamProxy.ProxyTagsList(req.Context(), upstreamNs, repoName)
 		if err != nil {
 			log.Printf("[UPSTREAM PROXY] Error: %v", err)
 			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
@@ -280,21 +302,16 @@ func (r *Router) getTags(w http.ResponseWriter, req *http.Request) {
 // ----------------------------------------------------
 
 func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 	ref := chi.URLParam(req, "reference")
 
 	// Check if this is an upstream registry request
-	upstreamNs := ns
-	if org != "" {
-		upstreamNs = org
-	}
+	upstreamNs := quotaNs
 	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), upstreamNs) {
+		repoName := filepath.Base(fullRepo)
 		log.Printf("[UPSTREAM PROXY] Proxying manifest request: %s:%s", fullRepo, ref)
-		upstreamResp, err := r.upstreamProxy.ProxyManifest(req.Context(), upstreamNs, repo, ref, req.Method)
+		upstreamResp, err := r.upstreamProxy.ProxyManifest(req.Context(), upstreamNs, repoName, ref, req.Method)
 		if err != nil {
 			log.Printf("[UPSTREAM PROXY] Error: %v", err)
 			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
@@ -325,14 +342,11 @@ func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 	ref := chi.URLParam(req, "reference")
 
-	log.Printf("[PUT_MANIFEST] Starting: fullRepo=%s org=%s ns=%s repo=%s ref=%s ContentLength=%d", fullRepo, org, ns, repo, ref, req.ContentLength)
+	log.Printf("[PUT_MANIFEST] Starting: fullRepo=%s namespace_context=%s ref=%s ContentLength=%d", fullRepo, quotaNs, ref, req.ContentLength)
 
 	// Limit manifest size to 10MB
 	maxManifestSize := int64(10 * 1024 * 1024)
@@ -387,10 +401,6 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	digest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
 	// Enforce Quota (use namespace for quota checking)
-	quotaNs := ns
-	if quotaNs == "" && org != "" {
-		quotaNs = org
-	}
 	quota, err := r.db.CheckQuota(req.Context(), quotaNs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -469,21 +479,16 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 // ----------------------------------------------------
 
 func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 	digest := chi.URLParam(req, "digest")
 
 	// Check if this is an upstream registry request
-	upstreamNs := ns
-	if org != "" {
-		upstreamNs = org
-	}
+	upstreamNs := quotaNs
 	if r.upstreamProxy != nil && r.upstreamProxy.IsUpstream(req.Context(), upstreamNs) {
+		repoName := filepath.Base(fullRepo)
 		log.Printf("[UPSTREAM PROXY] Proxying blob request: %s %s", fullRepo, digest)
-		upstreamResp, err := r.upstreamProxy.ProxyBlob(req.Context(), upstreamNs, repo, digest, req.Method)
+		upstreamResp, err := r.upstreamProxy.ProxyBlob(req.Context(), upstreamNs, repoName, digest, req.Method)
 		if err != nil {
 			log.Printf("[UPSTREAM PROXY] Error: %v", err)
 			http.Error(w, fmt.Sprintf(`{"errors":[{"code":"UPSTREAM_ERROR","message":"%s"}]}`, err.Error()), http.StatusBadGateway)
@@ -506,7 +511,7 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Docker-Content-Digest", digest)
 
 	if req.Method == "GET" {
-		path := getPath(ns, repo, digest)
+		path := getPath(fullRepo, digest)
 		reader, err := r.storage.Reader(req.Context(), path, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -526,17 +531,14 @@ func (r *Router) headBlob(w http.ResponseWriter, req *http.Request) {
 // ----------------------------------------------------
 
 func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 	uploadUUID := uuid.New().String()
 
-	log.Printf("[START_UPLOAD] fullRepo=%s org=%s ns=%s repo=%s uuid=%s", fullRepo, org, ns, repo, uploadUUID)
+	log.Printf("[START_UPLOAD] fullRepo=%s namespace_context=%s uuid=%s", fullRepo, quotaNs, uploadUUID)
 
 	// Create an empty temporary file to track the upload state
-	tempPath := getPath(ns, repo, "uploads/"+uploadUUID)
+	tempPath := getPath(fullRepo, "uploads/"+uploadUUID)
 	writer, err := r.storage.Writer(req.Context(), tempPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -552,11 +554,8 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	// Normally appends data to a temp file
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, _ := getRepoContext(req)
 	uuid := chi.URLParam(req, "uuid")
 
 	// Limit upload size per chunk
@@ -575,7 +574,7 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	tempPath := getPath(ns, repo, "uploads/"+uuid)
+	tempPath := getPath(fullRepo, "uploads/"+uuid)
 	appender, err := r.storage.Appender(req.Context(), tempPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -599,23 +598,20 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
-	// Extract repository path components from URL parameters
-	org := chi.URLParam(req, "org")
-	ns := chi.URLParam(req, "namespace")
-	repo := chi.URLParam(req, "repo")
-	fullRepo := getFullRepo(org, ns, repo)
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
 	uuid := chi.URLParam(req, "uuid")
 	digest := req.URL.Query().Get("digest")
 
-	log.Printf("[PUT_UPLOAD] fullRepo=%s org=%s ns=%s repo=%s uuid=%s digest=%s", fullRepo, org, ns, repo, uuid, digest)
+	log.Printf("[PUT_UPLOAD] fullRepo=%s namespace_context=%s uuid=%s digest=%s", fullRepo, quotaNs, uuid, digest)
 
 	if digest == "" {
 		http.Error(w, "digest query param required", http.StatusBadRequest)
 		return
 	}
 
-	tempPath := getPath(ns, repo, "uploads/"+uuid)
-	finalPath := getPath(ns, repo, digest)
+	tempPath := getPath(fullRepo, "uploads/"+uuid)
+	finalPath := getPath(fullRepo, digest)
 
 	// Idempotency check: Does this blob already exist?
 	exists, err := r.db.BlobExists(req.Context(), digest)
@@ -685,10 +681,6 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Enforce Quota (use namespace for quota checking)
-	quotaNs := ns
-	if quotaNs == "" && org != "" {
-		quotaNs = org
-	}
 	quota, err := r.db.CheckQuota(req.Context(), quotaNs)
 	if err != nil {
 		r.storage.Delete(req.Context(), tempPath)
