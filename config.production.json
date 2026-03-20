@@ -31,7 +31,15 @@
         "token_service": "registry",
         "private_key_path": "",
         "public_key_path": "",
-        "token_expiration": 259200000000000
+        "token_expiration": 259200000000000,
+        "oidc": {
+            "enabled": false,
+            "issuer": "https://sso.afterdarksys.com/application/o/ads-registry/",
+            "client_id": "",
+            "client_secret": "",
+            "redirect_url": "https://registry.afterdarksys.com/oauth2/callback",
+            "scopes": ["openid", "profile", "email", "groups"]
+        }
     },
     "logging": {
         "level": "info",
