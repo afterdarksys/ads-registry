@@ -1,11 +1,20 @@
 import { useState, useEffect } from 'react';
 import { Cloud, RefreshCw, CheckCircle, XCircle, Clock } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Upstreams() {
+  const { token } = useAuth();
   const [upstreams, setUpstreams] = useState<any[]>([]);
 
+  const getHeaders = () => ({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`
+  });
+
   const fetchData = () => {
-    fetch('/api/v1/management/upstreams')
+    fetch('/api/v1/management/upstreams', {
+      headers: getHeaders()
+    })
       .then(res => res.json())
       .then(data => setUpstreams(data || []))
       .catch(console.error);
