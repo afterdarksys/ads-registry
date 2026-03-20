@@ -19,6 +19,7 @@ type Config struct {
 	Redis         RedisConfig         `json:"redis"`
 	Compatibility CompatibilityConfig `json:"compatibility"`
 	Peers         []PeerRegistry      `json:"peers"`
+	DarkScan      DarkScanConfig      `json:"darkscan"`
 }
 
 type PeerRegistry struct {
@@ -250,6 +251,19 @@ type ObservabilityConfig struct {
 	LogSuccessOnly     bool    `json:"log_success_only"`
 }
 
+// DarkScanConfig configures the DarkScan vulnerability scanning integration via darkapi.io
+type DarkScanConfig struct {
+	Enabled         bool   `json:"enabled"`          // Enable DarkScan vulnerability scanning
+	BaseURL         string `json:"base_url"`         // DarkScan API base URL (e.g., "https://darkapi.io")
+	APIKey          string `json:"api_key"`          // API key for authentication
+	ScanOnPush      bool   `json:"scan_on_push"`     // Automatically scan images on push
+	ScanOnPull      bool   `json:"scan_on_pull"`     // Scan images on first pull (cache miss)
+	BlockOnCritical bool   `json:"block_on_critical"` // Block pulls if critical vulnerabilities found
+	BlockOnHigh     bool   `json:"block_on_high"`    // Block pulls if high severity vulnerabilities found
+	MaxConcurrent   int    `json:"max_concurrent"`   // Max concurrent scans (default: 5)
+	Timeout         int    `json:"timeout"`          // Scan timeout in seconds (default: 300)
+}
+
 // LoadFile reads and parses a JSON configuration file into the Config struct.
 func LoadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -336,6 +350,19 @@ func LoadFile(path string) (*Config, error) {
 	// Auth defaults
 	if cfg.Auth.TokenExpiration == 0 {
 		cfg.Auth.TokenExpiration = 24 * time.Hour // Default 24 hours
+	}
+
+	// DarkScan defaults
+	if cfg.DarkScan.Enabled {
+		if cfg.DarkScan.BaseURL == "" {
+			cfg.DarkScan.BaseURL = "https://darkapi.io"
+		}
+		if cfg.DarkScan.MaxConcurrent == 0 {
+			cfg.DarkScan.MaxConcurrent = 5
+		}
+		if cfg.DarkScan.Timeout == 0 {
+			cfg.DarkScan.Timeout = 300 // 5 minutes
+		}
 	}
 
 	// Compatibility defaults

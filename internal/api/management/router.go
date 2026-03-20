@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -428,53 +429,25 @@ func (r *Router) listScans(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Parse scan data and return summary
-	type ScanSummary struct {
-		Digest   string `json:"digest"`
-		Scanner  string `json:"scanner"`
-		Critical int    `json:"critical"`
-		High     int    `json:"high"`
-		Medium   int    `json:"medium"`
-		Low      int    `json:"low"`
-	}
-
-	var summaries []ScanSummary
+	// Parse DarkScan reports and return them directly
+	// The frontend expects the full DarkScan format
+	var scanResults []map[string]interface{}
 	for _, report := range reports {
-		// Parse Trivy JSON output
-		var trivyReport struct {
-			Results []struct {
-				Vulnerabilities []struct {
-					Severity string `json:"Severity"`
-				} `json:"Vulnerabilities"`
-			} `json:"Results"`
+		if report.Scanner != "darkscan" {
+			continue // Only return DarkScan results
 		}
 
-		summary := ScanSummary{
-			Digest:  report.Digest,
-			Scanner: report.Scanner,
+		var scanData map[string]interface{}
+		if err := json.Unmarshal(report.Data, &scanData); err != nil {
+			log.Printf("[SCANS API] Failed to parse scan report for %s: %v", report.Digest, err)
+			continue
 		}
 
-		if err := json.Unmarshal(report.Data, &trivyReport); err == nil {
-			for _, result := range trivyReport.Results {
-				for _, vuln := range result.Vulnerabilities {
-					switch vuln.Severity {
-					case "CRITICAL":
-						summary.Critical++
-					case "HIGH":
-						summary.High++
-					case "MEDIUM":
-						summary.Medium++
-					case "LOW":
-						summary.Low++
-					}
-				}
-			}
-		}
-
-		summaries = append(summaries, summary)
+		scanResults = append(scanResults, scanData)
 	}
 
-	json.NewEncoder(w).Encode(summaries)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(scanResults)
 }
 
 func (r *Router) getScanReport(w http.ResponseWriter, req *http.Request) {

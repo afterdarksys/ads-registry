@@ -20,6 +20,7 @@ import (
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/policy"
 	"github.com/ryan/ads-registry/internal/proxy"
+	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/sync"
 	"github.com/ryan/ads-registry/internal/upstreams"
@@ -34,9 +35,10 @@ type Router struct {
 	starlark      *automation.Engine
 	upstreamProxy *proxy.UpstreamProxy
 	syncManager   *sync.Manager
+	scanner       *scanner.Service
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
 		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
@@ -48,6 +50,7 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		tokenTs:       ts,
 		authMid:       auth.NewMiddleware(ts),
 		enforcer:      enf,
+		scanner:       scannerSvc,
 		starlark:      star,
 		upstreamProxy: upstreamProxy,
 		syncManager:   syncMgr,
@@ -472,6 +475,19 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 				if execErr := r.starlark.ExecuteEvent(hookPath, "push", eventPayload); execErr != nil {
 					log.Printf("[Starlark Engine] Error executing on_push hook: %v", execErr)
 				}
+			}
+		}()
+	}
+
+	// Async: Trigger vulnerability scan via DarkScan
+	if r.scanner != nil && r.scanner.IsEnabled() {
+		go func() {
+			registry := req.Host // e.g., "registry.afterdarksys.com"
+			tag := ref           // Could be tag or digest
+
+			ctx := req.Context()
+			if err := r.scanner.ScanImage(ctx, registry, fullRepo, tag, digest, mediaType); err != nil {
+				log.Printf("[SCANNER] Failed to submit scan for %s:%s - %v", fullRepo, tag, err)
 			}
 		}()
 	}

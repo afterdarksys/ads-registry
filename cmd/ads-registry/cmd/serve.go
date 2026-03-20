@@ -474,7 +474,13 @@ func runServer() {
 	syncManager.Start(2) // 2 concurrent sync workers
 	defer syncManager.Stop()
 
-	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication
+	// 7. Vulnerability Scanner (DarkScan via darkapi.io)
+	scannerService := scanner.NewService(store, cfg.DarkScan)
+	if scannerService.IsEnabled() {
+		logger.Info("DarkScan vulnerability scanner enabled")
+	}
+
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
 	v2api.Register(r)
 
 	// OAuth2 Authentication API for Web UI
