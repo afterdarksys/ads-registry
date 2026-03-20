@@ -961,3 +961,99 @@ func parseRepoPath(repoPath string) (namespace, repo string) {
 	}
 	return
 }
+
+// --------------------------------------------------------------------------------
+// Access Tokens
+// --------------------------------------------------------------------------------
+
+func (s *PostgresStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
+	scopesStr := strings.Join(scopes, ",")
+	var tokenID int
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO access_tokens (user_id, name, token_hash, scopes, expires_at) 
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		userID, name, tokenHash, scopesStr, expiresAt,
+	).Scan(&tokenID)
+	return tokenID, err
+}
+
+func (s *PostgresStore) ListAccessTokens(ctx context.Context, userID int) ([]db.AccessToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at 
+		 FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []db.AccessToken
+	for rows.Next() {
+		var t db.AccessToken
+		var scopesStr string
+		var lastUsed sql.NullTime
+		var expires sql.NullTime
+
+		err := rows.Scan(&t.ID, &t.UserID, &t.Name, &scopesStr, &t.CreatedAt, &lastUsed, &expires)
+		if err != nil {
+			return nil, err
+		}
+
+		t.Scopes = []string{scopesStr}
+		if lastUsed.Valid {
+			t.LastUsedAt = &lastUsed.Time
+		}
+		if expires.Valid {
+			t.ExpiresAt = &expires.Time
+		}
+
+		tokens = append(tokens, t)
+	}
+
+	return tokens, rows.Err()
+}
+
+func (s *PostgresStore) GetAccessTokenByHash(ctx context.Context, tokenHash string) (*db.AccessToken, error) {
+	var t db.AccessToken
+	var scopesStr string
+	var lastUsed sql.NullTime
+	var expires sql.NullTime
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at 
+		 FROM access_tokens WHERE token_hash = $1`,
+		tokenHash,
+	).Scan(&t.ID, &t.UserID, &t.Name, &scopesStr, &t.CreatedAt, &lastUsed, &expires)
+
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	t.Scopes = []string{scopesStr}
+	t.TokenHash = tokenHash
+	if lastUsed.Valid {
+		t.LastUsedAt = &lastUsed.Time
+	}
+	if expires.Valid {
+		t.ExpiresAt = &expires.Time
+	}
+
+	return &t, nil
+}
+
+func (s *PostgresStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM access_tokens WHERE id = $1", tokenID)
+	return err
+}
+
+func (s *PostgresStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE access_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1",
+		tokenID,
+	)
+	return err
+}

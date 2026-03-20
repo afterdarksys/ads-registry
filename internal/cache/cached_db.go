@@ -263,6 +263,27 @@ func (s *CachedStore) ListArtifactsByType(ctx context.Context, artifactType stri
 	return s.db.ListArtifactsByType(ctx, artifactType, limit)
 }
 
+// Access Tokens - passthrough (no caching for auth tokens)
+func (s *CachedStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
+	return s.db.CreateAccessToken(ctx, userID, name, tokenHash, scopes, expiresAt)
+}
+
+func (s *CachedStore) ListAccessTokens(ctx context.Context, userID int) ([]db.AccessToken, error) {
+	return s.db.ListAccessTokens(ctx, userID)
+}
+
+func (s *CachedStore) GetAccessTokenByHash(ctx context.Context, tokenHash string) (*db.AccessToken, error) {
+	return s.db.GetAccessTokenByHash(ctx, tokenHash)
+}
+
+func (s *CachedStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
+	return s.db.DeleteAccessToken(ctx, tokenID)
+}
+
+func (s *CachedStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
+	return s.db.UpdateAccessTokenLastUsed(ctx, tokenID)
+}
+
 func (s *CachedStore) Close() error {
 	return s.db.Close()
 }

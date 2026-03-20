@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -48,6 +49,13 @@ type Store interface {
 	SetQuota(ctx context.Context, namespace string, limitBytes int64) error
 	UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error
 	ListGroups(ctx context.Context) ([]Group, error)
+
+	// Access Tokens (for Docker CLI auth when using OAuth2)
+	CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error)
+	ListAccessTokens(ctx context.Context, userID int) ([]AccessToken, error)
+	GetAccessTokenByHash(ctx context.Context, tokenHash string) (*AccessToken, error)
+	DeleteAccessToken(ctx context.Context, tokenID int) error
+	UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error
 	ListQuotas(ctx context.Context) ([]Quota, error)
 
 	// Upstream Registries
@@ -74,6 +82,17 @@ type User struct {
 type Group struct {
 	ID   int
 	Name string
+}
+
+type AccessToken struct {
+	ID         int
+	UserID     int
+	Name       string
+	TokenHash  string
+	Scopes     []string
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	ExpiresAt  *time.Time
 }
 
 type Quota struct {

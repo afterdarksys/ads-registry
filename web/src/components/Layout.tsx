@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle, LogOut, ChevronDown, Moon, Sun } from 'lucide-react';
+import { LayoutDashboard, Users, Shield, Server, Settings, FileTerminal, Cloud, AlertTriangle, LogOut, ChevronDown, Moon, Sun, Key } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useState } from 'react';
@@ -12,6 +12,7 @@ const navigation = [
   { name: 'Vulnerabilities', href: '/vulnerabilities', icon: AlertTriangle },
   { name: 'Security Policies', href: '/policies', icon: Shield },
   { name: 'Automation Scripts', href: '/scripts', icon: FileTerminal },
+  { name: 'Access Keys', href: '/access-keys', icon: Key },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 

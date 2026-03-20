@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/ryan/ads-registry/internal/config"
@@ -697,6 +698,105 @@ func (s *SQLiteStore) ListArtifactsByType(ctx context.Context, artifactType stri
 
 // --------------------------------------------------------------------------------
 // Helpers
+// --------------------------------------------------------------------------------
+// Access Tokens
+// --------------------------------------------------------------------------------
+
+func (s *SQLiteStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
+	scopesStr := strings.Join(scopes, ",")
+	var tokenID int64
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO access_tokens (user_id, name, token_hash, scopes, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		userID, name, tokenHash, scopesStr, expiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	tokenID, err = result.LastInsertId()
+	return int(tokenID), err
+}
+
+func (s *SQLiteStore) ListAccessTokens(ctx context.Context, userID int) ([]db.AccessToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, name, token_hash, scopes, created_at, last_used_at, expires_at
+		 FROM access_tokens WHERE user_id = ? ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []db.AccessToken
+	for rows.Next() {
+		var t db.AccessToken
+		var scopesStr string
+		var lastUsed, expires sql.NullTime
+
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenHash, &scopesStr, &t.CreatedAt, &lastUsed, &expires); err != nil {
+			return nil, err
+		}
+
+		if scopesStr != "" {
+			t.Scopes = strings.Split(scopesStr, ",")
+		}
+		if lastUsed.Valid {
+			t.LastUsedAt = &lastUsed.Time
+		}
+		if expires.Valid {
+			t.ExpiresAt = &expires.Time
+		}
+
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+func (s *SQLiteStore) GetAccessTokenByHash(ctx context.Context, tokenHash string) (*db.AccessToken, error) {
+	var t db.AccessToken
+	var scopesStr string
+	var lastUsed, expires sql.NullTime
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, user_id, name, token_hash, scopes, created_at, last_used_at, expires_at
+		 FROM access_tokens WHERE token_hash = ?`,
+		tokenHash,
+	).Scan(&t.ID, &t.UserID, &t.Name, &t.TokenHash, &scopesStr, &t.CreatedAt, &lastUsed, &expires)
+
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if scopesStr != "" {
+		t.Scopes = strings.Split(scopesStr, ",")
+	}
+	if lastUsed.Valid {
+		t.LastUsedAt = &lastUsed.Time
+	}
+	if expires.Valid {
+		t.ExpiresAt = &expires.Time
+	}
+
+	return &t, nil
+}
+
+func (s *SQLiteStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM access_tokens WHERE id = ?`, tokenID)
+	return err
+}
+
+func (s *SQLiteStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE access_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		tokenID,
+	)
+	return err
+}
+
 // --------------------------------------------------------------------------------
 
 // parseRepoPath splits a repository path into namespace and repository name

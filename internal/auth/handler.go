@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ryan/ads-registry/internal/db"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Handler struct {
@@ -36,25 +38,88 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// 2. Authenticate user with password
-	dbUser, err := h.db.AuthenticateUser(req.Context(), user, pass)
-	if err != nil {
-		// Bootstrap fallback: Allow admin/admin if no users exist
-		if user == "admin" && pass == "admin" {
-			// Check if ANY users exist in the database
-			if testUser, _ := h.db.GetUserByUsername(req.Context(), "admin"); testUser == nil {
-				// No admin user exists - allow bootstrap login
-				log.Printf("WARNING: Bootstrap login used (admin/admin). Create a real user ASAP!")
-				dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
+	var dbUser *db.User
+	var err error
+
+	// 2. Check if this is an access token (password starts with "adsr_")
+	if strings.HasPrefix(pass, "adsr_") {
+		// Access token authentication
+		actualUsername := user
+		// Strip "-oci" suffix if present (Docker username format: username-oci)
+		if strings.HasSuffix(user, "-oci") {
+			actualUsername = strings.TrimSuffix(user, "-oci")
+		}
+
+		// Verify user exists
+		dbUser, err = h.db.GetUserByUsername(req.Context(), actualUsername)
+		if err != nil {
+			log.Printf("[AUTH] Access token auth failed: user %s not found", actualUsername)
+			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Find all tokens for this user and check if any match
+		tokens, err := h.db.ListAccessTokens(req.Context(), dbUser.ID)
+		if err != nil {
+			log.Printf("[AUTH] Failed to list access tokens for user %s: %v", actualUsername, err)
+			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		tokenValid := false
+		var validToken *db.AccessToken
+		for i := range tokens {
+			if err := bcrypt.CompareHashAndPassword([]byte(tokens[i].TokenHash), []byte(pass)); err == nil {
+				// Check if token is expired
+				if tokens[i].ExpiresAt != nil && tokens[i].ExpiresAt.Before(time.Now()) {
+					log.Printf("[AUTH] Access token for user %s is expired", actualUsername)
+					continue
+				}
+				tokenValid = true
+				validToken = &tokens[i]
+				break
+			}
+		}
+
+		if !tokenValid {
+			log.Printf("[AUTH] Invalid or expired access token for user %s", actualUsername)
+			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Update last_used_at timestamp
+		if err := h.db.UpdateAccessTokenLastUsed(req.Context(), validToken.ID); err != nil {
+			log.Printf("[AUTH] Warning: failed to update last_used_at for token %d: %v", validToken.ID, err)
+		}
+
+		// Use token's scopes instead of user's scopes
+		dbUser.Scopes = validToken.Scopes
+		user = actualUsername // Use actual username for JWT
+		log.Printf("[AUTH] Access token authentication successful for user %s (token: %s)", actualUsername, validToken.Name)
+	} else {
+		// 3. Authenticate user with password
+		dbUser, err = h.db.AuthenticateUser(req.Context(), user, pass)
+		if err != nil {
+			// Bootstrap fallback: Allow admin/admin if no users exist
+			if user == "admin" && pass == "admin" {
+				// Check if ANY users exist in the database
+				if testUser, _ := h.db.GetUserByUsername(req.Context(), "admin"); testUser == nil {
+					// No admin user exists - allow bootstrap login
+					log.Printf("WARNING: Bootstrap login used (admin/admin). Create a real user ASAP!")
+					dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
+				} else {
+					w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
 			} else {
 				w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-		} else {
-			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
 		}
 	}
 

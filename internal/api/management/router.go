@@ -1,13 +1,16 @@
 package management
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ryan/ads-registry/internal/auth"
@@ -37,64 +40,76 @@ func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, st
 
 func (r *Router) Register(mux chi.Router) {
 	mux.Route("/api/v1/management", func(api chi.Router) {
-		// Protected by admin-level authentication
-		api.Use(r.authMid.ProtectAdmin)
+		// User-level routes (any authenticated user)
+		api.Group(func(userAPI chi.Router) {
+			userAPI.Use(r.authMid.Protect)
 
-		api.Get("/stats", r.getStats)
+			// Access Tokens - users can manage their own tokens
+			userAPI.Get("/access-tokens", r.listAccessTokens)
+			userAPI.Post("/access-tokens", r.createAccessToken)
+			userAPI.Delete("/access-tokens/{id}", r.deleteAccessToken)
+		})
 
-		// Users
-		api.Get("/users", r.listUsers)
-		api.Post("/users", r.createUser)
-		api.Delete("/users/{username}", r.deleteUser)
-		api.Put("/users/{username}", r.updateUser)
-		api.Post("/users/{username}/reset-password", r.resetPassword)
+		// Admin-only routes
+		api.Group(func(adminAPI chi.Router) {
+			adminAPI.Use(r.authMid.ProtectAdmin)
 
-		// Groups & Quotas
-		api.Get("/quotas", r.listQuotas)
-		api.Post("/quotas", r.setQuota)
-		
-		api.Get("/groups", r.listGroups)
-		api.Post("/groups", r.createGroup)
-		api.Post("/groups/{name}/users", r.addUserToGroup)
+			adminAPI.Get("/stats", r.getStats)
 
-		// Repositories
-		api.Get("/repositories", r.listRepositories)
-		// FIVE-level repository (register FIRST - most specific)
-		api.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
-		api.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+			// Users
+			adminAPI.Get("/users", r.listUsers)
+			adminAPI.Post("/users", r.createUser)
+			adminAPI.Delete("/users/{username}", r.deleteUser)
+			adminAPI.Put("/users/{username}", r.updateUser)
+			adminAPI.Post("/users/{username}/reset-password", r.resetPassword)
 
-		// FOUR-level repository
-		api.Get("/repositories/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
-		api.Get("/repositories/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+			// Groups & Quotas
+			adminAPI.Get("/quotas", r.listQuotas)
+			adminAPI.Post("/quotas", r.setQuota)
 
-		// THREE-level repository
-		api.Get("/repositories/{org}/{namespace}/{repo}/tags", r.listTags)
-		api.Get("/repositories/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+			adminAPI.Get("/groups", r.listGroups)
+			adminAPI.Post("/groups", r.createGroup)
+			adminAPI.Post("/groups/{name}/users", r.addUserToGroup)
 
-		// TWO-level repository
-		api.Get("/repositories/{namespace}/{repo}/tags", r.listTags)
-		api.Get("/repositories/{namespace}/{repo}/manifests", r.listManifestsForRepo)
+			// Repositories
+			adminAPI.Get("/repositories", r.listRepositories)
+			// FIVE-level repository (register FIRST - most specific)
+			adminAPI.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
+			adminAPI.Get("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
 
-		// SINGLE-level repository (register LAST - least specific)
-		api.Get("/repositories/{repo}/tags", r.listTags)
-		api.Get("/repositories/{repo}/manifests", r.listManifestsForRepo)
+			// FOUR-level repository
+			adminAPI.Get("/repositories/{org1}/{org}/{namespace}/{repo}/tags", r.listTags)
+			adminAPI.Get("/repositories/{org1}/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
 
-		// Upstream Registries
-		api.Get("/upstreams", r.listUpstreams)
+			// THREE-level repository
+			adminAPI.Get("/repositories/{org}/{namespace}/{repo}/tags", r.listTags)
+			adminAPI.Get("/repositories/{org}/{namespace}/{repo}/manifests", r.listManifestsForRepo)
 
-		// Vulnerability Scans
-		api.Get("/scans", r.listScans)
-		api.Get("/scans/{digest}", r.getScanReport)
+			// TWO-level repository
+			adminAPI.Get("/repositories/{namespace}/{repo}/tags", r.listTags)
+			adminAPI.Get("/repositories/{namespace}/{repo}/manifests", r.listManifestsForRepo)
 
-		// Policies
-		api.Get("/policies", r.listPolicies)
-		api.Post("/policies", r.addPolicy)
+			// SINGLE-level repository (register LAST - least specific)
+			adminAPI.Get("/repositories/{repo}/tags", r.listTags)
+			adminAPI.Get("/repositories/{repo}/manifests", r.listManifestsForRepo)
 
-		// Scripts
-		api.Get("/scripts", r.listScripts)
-		api.Get("/scripts/{name}", r.getScript)
-		api.Put("/scripts/{name}", r.putScript)
-		api.Delete("/scripts/{name}", r.deleteScript)
+			// Upstream Registries
+			adminAPI.Get("/upstreams", r.listUpstreams)
+
+			// Vulnerability Scans
+			adminAPI.Get("/scans", r.listScans)
+			adminAPI.Get("/scans/{digest}", r.getScanReport)
+
+			// Policies
+			adminAPI.Get("/policies", r.listPolicies)
+			adminAPI.Post("/policies", r.addPolicy)
+
+			// Scripts
+			adminAPI.Get("/scripts", r.listScripts)
+			adminAPI.Get("/scripts/{name}", r.getScript)
+			adminAPI.Put("/scripts/{name}", r.putScript)
+			adminAPI.Delete("/scripts/{name}", r.deleteScript)
+		})
 
 	})
 }
@@ -582,6 +597,164 @@ func (r *Router) deleteScript(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --------------------------------------------------------------------------------
+// Access Tokens (for Docker CLI when using OAuth2/SSO)
+// --------------------------------------------------------------------------------
+
+func (r *Router) listAccessTokens(w http.ResponseWriter, req *http.Request) {
+	// Get user from auth context
+	username := req.Context().Value("username").(string)
+	user, err := r.db.GetUserByUsername(req.Context(), username)
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	tokens, err := r.db.ListAccessTokens(req.Context(), user.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Don't return the token_hash in the response
+	response := make([]map[string]interface{}, len(tokens))
+	for i, t := range tokens {
+		response[i] = map[string]interface{}{
+			"id":           t.ID,
+			"name":         t.Name,
+			"scopes":       t.Scopes,
+			"created_at":   t.CreatedAt,
+			"last_used_at": t.LastUsedAt,
+			"expires_at":   t.ExpiresAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+type createAccessTokenRequest struct {
+	Name      string `json:"name"`       // User-friendly name/slug
+	ExpiresIn int    `json:"expires_in"` // Optional: days until expiry (0 = no expiry)
+}
+
+func (r *Router) createAccessToken(w http.ResponseWriter, req *http.Request) {
+	var input createAccessTokenRequest
+	if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if input.Name == "" {
+		http.Error(w, "Token name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get user from auth context
+	username := req.Context().Value("username").(string)
+	user, err := r.db.GetUserByUsername(req.Context(), username)
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// Generate random token (32 bytes = 64 hex chars)
+	tokenBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
+		http.Error(w, "Failed to generate random token", http.StatusInternalServerError)
+		return
+	}
+	token := fmt.Sprintf("adsr_%x", tokenBytes)
+
+	// Hash the token for storage
+	tokenHash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate expiry
+	var expiresAt *time.Time
+	if input.ExpiresIn > 0 {
+		exp := time.Now().AddDate(0, 0, input.ExpiresIn)
+		expiresAt = &exp
+	}
+
+	// Inherit user's scopes
+	tokenID, err := r.db.CreateAccessToken(req.Context(), user.ID, input.Name, string(tokenHash), user.Scopes, expiresAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+			http.Error(w, "A token with this name already exists", http.StatusConflict)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return the token ONCE (can't be retrieved again)
+	response := map[string]interface{}{
+		"id":         tokenID,
+		"name":       input.Name,
+		"token":      token,
+		"expires_at": expiresAt,
+		"docker_login": map[string]string{
+			"registry": "registry.afterdarksys.com",
+			"username": fmt.Sprintf("%s-oci", user.Username),
+			"password": token,
+			"command":  fmt.Sprintf("docker login registry.afterdarksys.com -u %s-oci -p %s", user.Username, token),
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (r *Router) deleteAccessToken(w http.ResponseWriter, req *http.Request) {
+	tokenIDStr := chi.URLParam(req, "id")
+	tokenID, err := strconv.Atoi(tokenIDStr)
+	if err != nil {
+		http.Error(w, "Invalid token ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get user from auth context
+	username := req.Context().Value("username").(string)
+	user, err := r.db.GetUserByUsername(req.Context(), username)
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify token belongs to user (prevent users from deleting others' tokens)
+	tokens, err := r.db.ListAccessTokens(req.Context(), user.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	found := false
+	for _, t := range tokens {
+		if t.ID == tokenID {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(w, "Token not found or does not belong to you", http.StatusNotFound)
+		return
+	}
+
+	// Delete the token
+	if err := r.db.DeleteAccessToken(req.Context(), tokenID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

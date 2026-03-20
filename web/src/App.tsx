@@ -10,6 +10,7 @@ import Scripts from './pages/Scripts';
 import Settings from './pages/Settings';
 import Upstreams from './pages/Upstreams';
 import Vulnerabilities from './pages/Vulnerabilities';
+import AccessKeys from './pages/AccessKeys';
 import Login from './pages/Login';
 import AuthCallback from './pages/AuthCallback';
 import type { ReactNode } from 'react';
@@ -68,6 +69,7 @@ export default function App() {
               <Route path="vulnerabilities" element={<Vulnerabilities />} />
               <Route path="policies" element={<Policies />} />
               <Route path="scripts" element={<Scripts />} />
+              <Route path="access-keys" element={<AccessKeys />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>
