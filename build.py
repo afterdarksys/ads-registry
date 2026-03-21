@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import socket
+import argparse
 
 CONFIG_FILE = "config.json"
 
@@ -61,26 +62,53 @@ def run_tests():
         sys.exit(1)
     log("Tests passed successfully.")
 
-def build_binary():
-    log("Compiling Go binary 'ads-registry'...")
-    # CGO_ENABLED=1 is required for go-sqlite3
+def build_binary(name, path, cgo_enabled="1"):
+    log(f"Compiling Go binary '{name}'...")
     env = os.environ.copy()
-    env["CGO_ENABLED"] = "1"
-    
-    result = subprocess.run(["go", "build", "-o", "ads-registry", "./cmd/ads-registry/"], env=env)
+    env["CGO_ENABLED"] = cgo_enabled
+
+    result = subprocess.run(["go", "build", "-o", name, path], env=env)
     if result.returncode != 0:
-        log("Compilation failed.")
+        log(f"Compilation of '{name}' failed.")
+        return False
+    log(f"Successfully built '{name}'.")
+    return True
+
+def build_all_binaries():
+    log("Building all project binaries...")
+
+    binaries = [
+        ("ads-registry", "./cmd/ads-registry/", "1"),  # CGO required for sqlite3
+        ("adsradm", "./cmd/adsradm/", "0"),            # No CGO needed
+        ("migrate-registry/migrate-registry", "./migrate-registry/", "0")  # No CGO needed
+    ]
+
+    failed = []
+    for name, path, cgo in binaries:
+        if not build_binary(name, path, cgo):
+            failed.append(name)
+
+    if failed:
+        log(f"Failed to build: {', '.join(failed)}")
         sys.exit(1)
-    log("Successfully built 'ads-registry'.")
+
+    log("All binaries built successfully!")
 
 def main():
+    parser = argparse.ArgumentParser(description='ADS Registry Build Automation')
+    parser.add_argument('--skip-test', action='store_true',
+                      help='Skip running tests before building')
+    parser.add_argument('--skip-db-check', action='store_true',
+                      help='Skip database connectivity checks')
+    args = parser.parse_args()
+
     log("Starting ADS Registry Automation Build Process")
-    
+
     cfg = load_config()
     db_cfg = cfg.get("database", {})
-    
+
     # Optional Database Initialization and Checking
-    if db_cfg.get("db_check", False):
+    if not args.skip_db_check and db_cfg.get("db_check", False):
         driver = db_cfg.get("driver")
         dsn = db_cfg.get("dsn")
         if driver == "sqlite3":
@@ -91,9 +119,13 @@ def main():
             log(f"Unknown driver: {driver}")
 
     # Testing and Compilation
-    run_tests()
-    build_binary()
-    
+    if not args.skip_test:
+        run_tests()
+    else:
+        log("Skipping tests as requested")
+
+    build_all_binaries()
+
     log("Automation suite completed! You can now run './ads-registry serve'")
 
 if __name__ == "__main__":

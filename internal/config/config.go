@@ -36,6 +36,7 @@ type ServerConfig struct {
 	WriteTimeout      time.Duration `json:"write_timeout"`
 	IdleTimeout       time.Duration `json:"idle_timeout"`
 	ReadHeaderTimeout time.Duration `json:"read_header_timeout"`
+	MaxHeaderBytes    int           `json:"max_header_bytes"`
 	TLS               TLSConfig     `json:"tls"`
 }
 
@@ -309,6 +310,12 @@ func LoadFile(path string) (*Config, error) {
 		cfg.Server.WriteTimeout = 10 * time.Second
 		cfg.Server.IdleTimeout = 60 * time.Second
 		cfg.Server.ReadHeaderTimeout = 5 * time.Second
+	}
+
+	// Default to 10MB for headers (sufficient for most registries)
+	// Can be increased for large manifests with many layers
+	if cfg.Server.MaxHeaderBytes == 0 {
+		cfg.Server.MaxHeaderBytes = 10 << 20 // 10MB
 	}
 
 	if len(cfg.Webhooks) == 0 {

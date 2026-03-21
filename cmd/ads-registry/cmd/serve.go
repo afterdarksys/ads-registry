@@ -539,6 +539,7 @@ func runServer() {
 		WriteTimeout:      cfg.Server.WriteTimeout,
 		IdleTimeout:       cfg.Server.IdleTimeout,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
 
 	go func() {
@@ -558,6 +559,7 @@ func runServer() {
 			WriteTimeout:      cfg.Server.WriteTimeout,
 			IdleTimeout:       cfg.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 			TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
 		}
 		go func() {

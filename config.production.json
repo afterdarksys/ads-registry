@@ -2,10 +2,11 @@
     "server": {
         "address": "0.0.0.0",
         "port": 5005,
-        "read_timeout": 300000000000,
-        "write_timeout": 300000000000,
+        "read_timeout": 600000000000,
+        "write_timeout": 600000000000,
         "idle_timeout": 120000000000,
-        "read_header_timeout": 10000000000,
+        "read_header_timeout": 30000000000,
+        "max_header_bytes": 52428800,
         "tls": {
             "enabled": true,
             "port": 5006,
@@ -33,10 +34,10 @@
         "public_key_path": "",
         "token_expiration": 259200000000000,
         "oidc": {
-            "enabled": false,
-            "issuer": "https://sso.afterdarksys.com/application/o/ads-registry/",
-            "client_id": "",
-            "client_secret": "",
+            "enabled": true,
+            "issuer": "https://auth.afterdarksys.com/application/o/ads-registry/",
+            "client_id": "ads-registry",
+            "client_secret": "ca2ae983e7d7d4ad45e619a0da7f2079b7ec4e5510e370b0bddc45b6c6758d14",
             "redirect_url": "https://registry.afterdarksys.com/oauth2/callback",
             "scopes": ["openid", "profile", "email", "groups"]
         }
