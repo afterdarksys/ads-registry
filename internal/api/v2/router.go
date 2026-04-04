@@ -169,7 +169,8 @@ func (r *Router) baseCheck(w http.ResponseWriter, req *http.Request) {
 
 	// If no auth provided, tell Docker where to get a token
 	if req.Header.Get("Authorization") == "" {
-		w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="https://%s/auth/token",service="registry"`, req.Host))
+		scheme := auth.GetScheme(req)
+		w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s://%s/auth/token",service="registry"`, scheme, req.Host))
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -653,41 +654,86 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var size int64
-	var errCopy error
+	var actualDigest string
 
-	// If there's a body, it's a monolithic upload or the final chunk
-	// Try appended reading
+	// Check if this is a monolithic upload (temp file doesn't exist yet)
+	// or chunked upload (temp file was created by prior PATCH requests)
+	tempFileExists := true
+	if _, err := r.storage.Stat(req.Context(), tempPath); err != nil {
+		if err == storage.ErrNotFound {
+			tempFileExists = false
+		}
+	}
+
+	// If there's a body, append it (monolithic upload or final chunk)
 	if req.ContentLength > 0 || req.Body != http.NoBody {
-		appender, err := r.storage.Appender(req.Context(), tempPath)
+		if tempFileExists {
+			// Chunked upload: append final chunk to existing temp file
+			appender, err := r.storage.Appender(req.Context(), tempPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, err = io.Copy(appender, req.Body)
+			appender.Close()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// For chunked uploads, we must read the entire accumulated file to compute hash
+			reader, err := r.storage.Reader(req.Context(), tempPath, 0)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			hasher := sha256.New()
+			size, err = io.Copy(hasher, reader)
+			reader.Close()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+		} else {
+			// Monolithic upload: CRITICAL FIX - compute digest DURING upload
+			// This eliminates the blocking re-read for large layers (common case)
+			appender, err := r.storage.Appender(req.Context(), tempPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			hasher := sha256.New()
+			multiWriter := io.MultiWriter(appender, hasher)
+			size, err = io.Copy(multiWriter, req.Body)
+			appender.Close()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+		}
+	} else {
+		// No body - compute digest from existing temp file (chunked upload finalization)
+		reader, err := r.storage.Reader(req.Context(), tempPath, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		_, errCopy = io.Copy(appender, req.Body)
-		appender.Close()
-		if errCopy != nil {
-			http.Error(w, errCopy.Error(), http.StatusInternalServerError)
+		hasher := sha256.New()
+		size, err = io.Copy(hasher, reader)
+		reader.Close()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 	}
 
-	// Verify digest by computing hash of uploaded content
-	reader, err := r.storage.Reader(req.Context(), tempPath, 0)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	hasher := sha256.New()
-	size, errCopy = io.Copy(hasher, reader)
-	reader.Close()
-	if errCopy != nil {
-		http.Error(w, errCopy.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	actualDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+	// Verify digest matches expected
 	if actualDigest != digest {
 		// Digest mismatch - delete uploaded file and return error
 		r.storage.Delete(req.Context(), tempPath)

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -15,19 +16,52 @@ var UserContext = userContextKey("user")
 
 type Middleware struct {
 	tokenService *TokenService
+	serviceName  string
 }
 
 func NewMiddleware(ts *TokenService) *Middleware {
-	return &Middleware{tokenService: ts}
+	return &Middleware{
+		tokenService: ts,
+		serviceName:  ts.service,
+	}
+}
+
+// GetScheme determines the protocol scheme (http/https) from the request
+func GetScheme(r *http.Request) string {
+	log.Printf("[AUTH/getScheme] Called with Host=%s, TLS=%v, X-Forwarded-Proto=%s",
+		r.Host, r.TLS != nil, r.Header.Get("X-Forwarded-Proto"))
+
+	// Force HTTP for localhost to avoid TLS issues
+	if strings.HasPrefix(r.Host, "localhost:") || strings.HasPrefix(r.Host, "127.0.0.1:") {
+		log.Printf("[AUTH] Forcing HTTP for localhost: Host=%s", r.Host)
+		return "http"
+	}
+
+	// Check if request came via TLS
+	if r.TLS != nil {
+		log.Printf("[AUTH] Detected HTTPS via r.TLS: Host=%s", r.Host)
+		return "https"
+	}
+
+	// Check X-Forwarded-Proto header (set by reverse proxies)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		log.Printf("[AUTH] Using X-Forwarded-Proto=%s: Host=%s", proto, r.Host)
+		return proto
+	}
+
+	// Default to http
+	log.Printf("[AUTH] Defaulting to HTTP: Host=%s", r.Host)
+	return "http"
 }
 
 func (m *Middleware) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme := GetScheme(r)
 
 		// Bypass auth challenge if hitting /v2/ root without token
 		if r.URL.Path == "/v2/" && r.Header.Get("Authorization") == "" {
 			// Instruct docker client to get a token
-			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="http://%s/auth/token",service="%s"`, r.Host, "registry"))
+			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s://%s/auth/token",service="%s"`, scheme, r.Host, m.serviceName))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -35,7 +69,7 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			// Require auth
-			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="http://%s/auth/token",service="%s"`, r.Host, "registry"))
+			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s://%s/auth/token",service="%s"`, scheme, r.Host, m.serviceName))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

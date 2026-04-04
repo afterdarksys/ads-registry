@@ -51,6 +51,14 @@ func (p *UpstreamProxy) IsUpstream(ctx context.Context, namespace string) bool {
 	return false
 }
 
+// getScheme returns the upstream's scheme, defaulting to https if not configured
+func getScheme(upstream *upstreams.UpstreamRegistry) string {
+	if upstream.Scheme == "" {
+		return "https"
+	}
+	return upstream.Scheme
+}
+
 // ProxyManifest proxies a manifest GET/HEAD request to an upstream registry
 func (p *UpstreamProxy) ProxyManifest(ctx context.Context, upstreamName, repository, reference string, method string) (*http.Response, error) {
 	// Get upstream configuration
@@ -78,8 +86,9 @@ func (p *UpstreamProxy) ProxyManifest(ctx context.Context, upstreamName, reposit
 	}
 
 	// Build upstream URL
-	// Format: https://{endpoint}/v2/{repository}/manifests/{reference}
-	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", targetUpstream.Endpoint, repository, reference)
+	// Format: {scheme}://{endpoint}/v2/{repository}/manifests/{reference}
+	scheme := getScheme(targetUpstream)
+	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, targetUpstream.Endpoint, repository, reference)
 
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
@@ -134,7 +143,8 @@ func (p *UpstreamProxy) ProxyBlob(ctx context.Context, upstreamName, repository,
 	}
 
 	// Build upstream URL
-	url := fmt.Sprintf("https://%s/v2/%s/blobs/%s", targetUpstream.Endpoint, repository, digest)
+	scheme := getScheme(targetUpstream)
+	url := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", scheme, targetUpstream.Endpoint, repository, digest)
 
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
@@ -183,7 +193,8 @@ func (p *UpstreamProxy) ProxyTagsList(ctx context.Context, upstreamName, reposit
 	}
 
 	// Build upstream URL
-	url := fmt.Sprintf("https://%s/v2/%s/tags/list", targetUpstream.Endpoint, repository)
+	scheme := getScheme(targetUpstream)
+	url := fmt.Sprintf("%s://%s/v2/%s/tags/list", scheme, targetUpstream.Endpoint, repository)
 
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)

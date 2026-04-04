@@ -22,6 +22,7 @@ type UpstreamRegistry struct {
 	Name        string       // User-friendly name (e.g., "production-ecr")
 	Type        UpstreamType // Cloud provider type
 	Endpoint    string       // Registry endpoint URL
+	Scheme      string       // Protocol scheme (http/https), defaults to https
 	Region      string       // Cloud region (AWS, Oracle, GCP)
 
 	// Credentials (encrypted in DB, or Vault reference)
