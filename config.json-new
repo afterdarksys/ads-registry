@@ -1,0 +1,163 @@
+{
+    "server": {
+        "address": "0.0.0.0",
+        "port": 5005,
+        "read_timeout": 1800000000000,
+        "write_timeout": 1800000000000,
+        "idle_timeout": 300000000000,
+        "read_header_timeout": 30000000000,
+        "max_header_bytes": 1048576,
+        "tls": {
+            "enabled": false,
+            "port": 5006,
+            "cert_file": "certs/server.crt",
+            "key_file": "certs/server.key"
+        }
+    },
+    "database": {
+        "driver": "sqlite3",
+        "dsn": "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared",
+        "max_open_conns": 25,
+        "max_idle_conns": 5,
+        "conn_max_lifetime": 3600000000000
+    },
+    "storage": {
+        "driver": "local",
+        "local": {
+            "root_directory": "data/blobs"
+        },
+        "s3": {
+            "region": "us-west-2",
+            "bucket": "ads-registry-blobs",
+            "access_key_id": "",
+            "secret_access_key": "",
+            "endpoint": ""
+        },
+        "minio": {
+            "endpoint": "localhost:9000",
+            "access_key_id": "minioadmin",
+            "secret_access_key": "minioadmin",
+            "bucket": "registry",
+            "use_ssl": false,
+            "region": "us-east-1"
+        },
+        "oci": {
+            "namespace": "your-oci-namespace",
+            "bucket": "ads-registry",
+            "region": "us-phoenix-1",
+            "compartment_id": "ocid1.compartment.oc1...",
+            "tenancy_id": "ocid1.tenancy.oc1...",
+            "user_id": "ocid1.user.oc1...",
+            "fingerprint": "aa:bb:cc:dd:ee:ff:11:22:33:44:55:66:77:88:99:00",
+            "private_key_path": "/path/to/oci_api_key.pem",
+            "private_key": "",
+            "endpoint": ""
+        }
+    },
+    "auth": {
+        "token_issuer": "ads-registry",
+        "token_service": "registry",
+        "private_key_path": "",
+        "public_key_path": ""
+    },
+    "logging": {
+        "syslog": {
+            "enabled": false,
+            "server": "local",
+            "tag": "ads-registry",
+            "priority": "INFO"
+        },
+        "elasticsearch": {
+            "enabled": false,
+            "endpoint": "http://localhost:9200",
+            "index": "ads-registry",
+            "username": "",
+            "password": ""
+        }
+    },
+    "vault": {
+        "enabled": false,
+        "address": "http://localhost:8200",
+        "token": "",
+        "mount_path": "secret",
+        "key_path": "ads-registry/jwt-keys"
+    },
+    "queue": {
+        "enabled": true,
+        "vulnerability_queue": 4,
+        "periodic_queue": 1,
+        "default_queue": 2
+    },
+    "redis": {
+        "enabled": false,
+        "address": "localhost:6379",
+        "password": "",
+        "db": 0,
+        "ttl": {
+            "manifest": 300,
+            "signature": 300,
+            "scan_report": 3600,
+            "policy": 300
+        }
+    },
+    "peers": [],
+    "darkscan": {
+        "enabled": false,
+        "api_key": "",
+        "endpoint": "https://darkapi.io/api/v1"
+    },
+    "compatibility": {
+        "enabled": true,
+        "docker_client_workarounds": {
+            "enable_docker_29_manifest_fix": true,
+            "force_http1_for_manifests": true,
+            "disable_chunked_encoding": false,
+            "max_manifest_size": 10485760,
+            "extra_flushes": 5,
+            "header_write_delay_ms": 50
+        },
+        "protocol_emulation": {
+            "emulate_docker_registry_v2": true,
+            "emulate_distribution_v3": false,
+            "expose_oci_features": true,
+            "strict_mode": false
+        },
+        "broken_client_hacks": {
+            "podman_digest_workaround": true,
+            "skopeo_layer_reuse": true,
+            "crane_manifest_format": "auto",
+            "containerd_content_length": true,
+            "buildkit_parallel_upload": false,
+            "nerdctl_missing_headers": true
+        },
+        "tls_compatibility": {
+            "min_tls_version": "1.2",
+            "enable_legacy_ciphers": false,
+            "http2_enabled": false,
+            "force_http1_for_clients": ["Docker/29\\..*"],
+            "alpn_protocols": ["http/1.1"]
+        },
+        "header_workarounds": {
+            "always_send_distribution_api_version": true,
+            "content_type_fixups": true,
+            "location_header_format": "absolute",
+            "enable_cors": false,
+            "accept_malformed_accept": true,
+            "normalize_digest_header": true
+        },
+        "rate_limit_exceptions": {
+            "trusted_registries": [],
+            "cicd_user_agents": ["GitLab-Runner/.*", "GitHub-Actions/.*"],
+            "trusted_ip_ranges": [],
+            "bypass_for_authenticated": true
+        },
+        "observability": {
+            "log_workarounds": true,
+            "log_client_detection": true,
+            "enable_metrics": true,
+            "metrics_prefix": "ads_registry_compat_",
+            "log_sample_rate": 1.0,
+            "log_success_only": false
+        }
+    }
+}

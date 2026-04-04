@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -118,7 +119,7 @@ func runServer() {
 			},
 			Database: config.DatabaseConfig{
 				Driver:          "sqlite3",
-				DSN:             "data/registry.db",
+				DSN:             "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared",
 				MaxOpenConns:    100,
 				MaxIdleConns:    10,
 				ConnMaxLifetime: 1 * time.Hour,
@@ -470,7 +471,13 @@ func runServer() {
 	logger.Info("Starlark cron scheduler started")
 
 	// 6. Master-Peer Sync Engine
-	syncManager := sync.NewManager(cfg.Peers, starEng)
+	// Construct local registry host for the sync manager
+	localHost := fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.Port)
+	if cfg.Server.TLS.Enabled {
+		localHost = fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.TLS.Port)
+	}
+
+	syncManager := sync.NewManager(cfg.Peers, starEng, store, storageProvider, localHost)
 	syncManager.Start(2) // 2 concurrent sync workers
 	defer syncManager.Stop()
 
@@ -531,7 +538,7 @@ func runServer() {
 		fs.ServeHTTP(w, req)
 	})
 
-	// 4. Server
+	// 4. Server with TCP optimizations for container registry workloads
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.Port),
 		Handler:           r,
@@ -540,10 +547,22 @@ func runServer() {
 		IdleTimeout:       cfg.Server.IdleTimeout,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+		// ConnContext allows us to configure TCP options per connection
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			// Disable Nagle's algorithm for low-latency manifest/blob transfers
+			// Critical for small manifest uploads on slow/unreliable networks
+			if tcpConn, ok := c.(*net.TCPConn); ok {
+				tcpConn.SetNoDelay(true)
+				// Increase buffer sizes for better throughput on high-latency networks
+				tcpConn.SetReadBuffer(1024 * 1024)  // 1MB read buffer
+				tcpConn.SetWriteBuffer(1024 * 1024) // 1MB write buffer
+			}
+			return ctx
+		},
 	}
 
 	go func() {
-		logger.Info(fmt.Sprintf("Starting registry on %s:%d", cfg.Server.Address, cfg.Server.Port))
+		logger.Info(fmt.Sprintf("Starting registry on %s:%d (TCP_NODELAY enabled)", cfg.Server.Address, cfg.Server.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Critical("Server error", err)
 			log.Fatalf("server error: %v", err)
@@ -561,6 +580,15 @@ func runServer() {
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 			TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
+			// Apply same TCP optimizations to TLS connections
+			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+				if tcpConn, ok := c.(*net.TCPConn); ok {
+					tcpConn.SetNoDelay(true)
+					tcpConn.SetReadBuffer(1024 * 1024)
+					tcpConn.SetWriteBuffer(1024 * 1024)
+				}
+				return ctx
+			},
 		}
 		go func() {
 			logger.Info(fmt.Sprintf("Starting secure registry on %s:%d", cfg.Server.Address, cfg.Server.TLS.Port))

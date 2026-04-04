@@ -2,12 +2,13 @@
     "server": {
         "address": "0.0.0.0",
         "port": 5005,
-        "read_timeout": 300000000000,
-        "write_timeout": 300000000000,
-        "idle_timeout": 120000000000,
-        "read_header_timeout": 10000000000,
+        "read_timeout": 1800000000000,
+        "write_timeout": 1800000000000,
+        "idle_timeout": 300000000000,
+        "read_header_timeout": 30000000000,
+        "max_header_bytes": 1048576,
         "tls": {
-            "enabled": true,
+            "enabled": false,
             "port": 5006,
             "cert_file": "certs/server.crt",
             "key_file": "certs/server.key"
@@ -15,7 +16,7 @@
     },
     "database": {
         "driver": "sqlite3",
-        "dsn": "data/registry.db",
+        "dsn": "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared",
         "max_open_conns": 25,
         "max_idle_conns": 5,
         "conn_max_lifetime": 3600000000000
@@ -88,7 +89,7 @@
         "default_queue": 2
     },
     "redis": {
-        "enabled": true,
+        "enabled": false,
         "address": "localhost:6379",
         "password": "",
         "db": 0,
@@ -97,6 +98,66 @@
             "signature": 300,
             "scan_report": 3600,
             "policy": 300
+        }
+    },
+    "peers": [],
+    "darkscan": {
+        "enabled": false,
+        "api_key": "",
+        "endpoint": "https://darkapi.io/api/v1"
+    },
+    "compatibility": {
+        "enabled": true,
+        "docker_client_workarounds": {
+            "enable_docker_29_manifest_fix": true,
+            "force_http1_for_manifests": true,
+            "disable_chunked_encoding": false,
+            "max_manifest_size": 10485760,
+            "extra_flushes": 5,
+            "header_write_delay_ms": 50
+        },
+        "protocol_emulation": {
+            "emulate_docker_registry_v2": true,
+            "emulate_distribution_v3": false,
+            "expose_oci_features": true,
+            "strict_mode": false
+        },
+        "broken_client_hacks": {
+            "podman_digest_workaround": true,
+            "skopeo_layer_reuse": true,
+            "crane_manifest_format": "auto",
+            "containerd_content_length": true,
+            "buildkit_parallel_upload": false,
+            "nerdctl_missing_headers": true
+        },
+        "tls_compatibility": {
+            "min_tls_version": "1.2",
+            "enable_legacy_ciphers": false,
+            "http2_enabled": false,
+            "force_http1_for_clients": ["Docker/29\\..*"],
+            "alpn_protocols": ["http/1.1"]
+        },
+        "header_workarounds": {
+            "always_send_distribution_api_version": true,
+            "content_type_fixups": true,
+            "location_header_format": "absolute",
+            "enable_cors": false,
+            "accept_malformed_accept": true,
+            "normalize_digest_header": true
+        },
+        "rate_limit_exceptions": {
+            "trusted_registries": [],
+            "cicd_user_agents": ["GitLab-Runner/.*", "GitHub-Actions/.*"],
+            "trusted_ip_ranges": [],
+            "bypass_for_authenticated": true
+        },
+        "observability": {
+            "log_workarounds": true,
+            "log_client_detection": true,
+            "enable_metrics": true,
+            "metrics_prefix": "ads_registry_compat_",
+            "log_sample_rate": 1.0,
+            "log_success_only": false
         }
     }
 }

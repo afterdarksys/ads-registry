@@ -102,11 +102,15 @@ func (m *Middleware) CompatibilityMiddleware(next http.Handler) http.Handler {
 func (m *Middleware) determineWorkarounds(client *ClientInfo, r *http.Request) []string {
 	var workarounds []string
 
-	// Docker 29.x manifest upload fix
+	// Docker manifest upload fix (affects 18.x, 19.x, 29.x)
 	if m.config.DockerClientWorkarounds.EnableDocker29ManifestFix {
-		if client.IsDockerClient() && client.MatchesVersion("29.*") {
+		if client.IsDockerClient() && (client.MatchesVersion("18.*") || client.MatchesVersion("19.*") || client.MatchesVersion("29.*")) {
 			if r.Method == "PUT" && strings.Contains(r.URL.Path, "/manifests/") {
 				workarounds = append(workarounds, "docker_29_manifest_fix")
+			}
+			// Force connection closure on blob operations to prevent reuse issues
+			if strings.Contains(r.URL.Path, "/blobs/") {
+				workarounds = append(workarounds, "docker_29_force_close_blobs")
 			}
 		}
 	}
@@ -323,6 +327,15 @@ func (w *compatResponseWriter) applyHeaderWorkarounds() {
 		header.Set("Access-Control-Allow-Origin", "*")
 		header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	}
+
+	// Docker 29.x connection closure fix for blob operations
+	if w.hasWorkaround("docker_29_force_close_blobs") {
+		header.Set("Connection", "close")
+
+		if w.middleware.config.Observability.EnableMetrics {
+			w.middleware.metrics.RecordHeaderWorkaround("Connection", "force_close")
+		}
 	}
 }
 

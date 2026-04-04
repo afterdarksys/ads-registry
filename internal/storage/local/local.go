@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"os"
@@ -29,8 +30,41 @@ func (s *LocalStore) Writer(ctx context.Context, path string) (io.WriteCloser, e
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return nil, err
 	}
-	// O_TRUNC for simplicity. In a real registry we'd use temporary files and rename.
-	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+
+	file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use buffered I/O for Writer as well
+	return &bufferedFileWriter{
+		file:   file,
+		writer: bufio.NewWriterSize(file, 256*1024),
+	}, nil
+}
+
+// bufferedFileWriter wraps os.File with buffered I/O and explicit sync
+type bufferedFileWriter struct {
+	file   *os.File
+	writer *bufio.Writer
+}
+
+func (w *bufferedFileWriter) Write(p []byte) (int, error) {
+	return w.writer.Write(p)
+}
+
+func (w *bufferedFileWriter) Close() error {
+	// Flush buffered data to OS
+	if err := w.writer.Flush(); err != nil {
+		w.file.Close()
+		return err
+	}
+	// Ensure data is written to disk before closing
+	if err := w.file.Sync(); err != nil {
+		w.file.Close()
+		return err
+	}
+	return w.file.Close()
 }
 
 func (s *LocalStore) Appender(ctx context.Context, path string) (io.WriteCloser, error) {
@@ -38,7 +72,18 @@ func (s *LocalStore) Appender(ctx context.Context, path string) (io.WriteCloser,
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+
+	file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use 256KB buffer for optimal network-to-disk performance
+	// Larger than TCP buffer (1MB) would waste memory, smaller causes more syscalls
+	return &bufferedFileWriter{
+		file:   file,
+		writer: bufio.NewWriterSize(file, 256*1024),
+	}, nil
 }
 
 func (s *LocalStore) Reader(ctx context.Context, path string, offset int64) (io.ReadCloser, error) {

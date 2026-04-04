@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - authentik_postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:-authentik_postgres_password}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_DB: ${PG_DB:-authentik}
+    networks:
+      - authentik
+
+  redis:
+    image: docker.io/library/redis:alpine
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - authentik_redis:/data
+    networks:
+      - authentik
+
+  server:
+    image: ghcr.io/goauthentik/server:2024.8.3
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-authentik_postgres_password}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      # SMTP Configuration (optional)
+      # AUTHENTIK_EMAIL__HOST: smtp.gmail.com
+      # AUTHENTIK_EMAIL__PORT: 587
+      # AUTHENTIK_EMAIL__USERNAME: your-email@gmail.com
+      # AUTHENTIK_EMAIL__PASSWORD: your-app-password
+      # AUTHENTIK_EMAIL__USE_TLS: "true"
+      # AUTHENTIK_EMAIL__FROM: authentik@afterdarksys.com
+    volumes:
+      - ./media:/media
+      - ./custom-templates:/templates
+    ports:
+      - "0.0.0.0:9000:9000"
+      - "0.0.0.0:9443:9443"
+    networks:
+      - authentik
+    depends_on:
+      - postgresql
+      - redis
+
+  worker:
+    image: ghcr.io/goauthentik/server:2024.8.3
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-authentik_postgres_password}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./media:/media
+      - ./certs:/certs
+      - ./custom-templates:/templates
+    networks:
+      - authentik
+    depends_on:
+      - postgresql
+      - redis
+
+volumes:
+  authentik_postgres:
+    driver: local
+  authentik_redis:
+    driver: local
+
+networks:
+  authentik:
+    driver: bridge

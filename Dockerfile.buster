@@ -1,0 +1,41 @@
+# Build stage - use Debian Buster to match production GLIBC 2.28
+FROM golang:1.21-buster AS builder
+
+# Install build dependencies for CGO (sqlite3)
+RUN apt-get update && apt-get install -y gcc g++ make libc6-dev
+
+WORKDIR /app
+
+# Copy go mod and sum files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+# Build the application
+# CGO_ENABLED=1 is required for go-sqlite3
+RUN CGO_ENABLED=1 GOOS=linux go build -o ads-registry ./cmd/ads-registry/
+
+# Final stage - also Buster for runtime compatibility
+FROM debian:buster-slim
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    ca-certificates \
+    libc6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the binary from the builder stage
+COPY --from=builder /app/ads-registry .
+
+# Copy the configuration file
+COPY config.json ./
+
+# Expose the API port
+EXPOSE 5005
+
+CMD ["./ads-registry", "serve"]

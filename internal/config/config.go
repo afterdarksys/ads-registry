@@ -381,6 +381,9 @@ func LoadFile(path string) (*Config, error) {
 	}
 	if cfg.Compatibility.Enabled {
 		// Docker workarounds defaults
+		// Enable Docker manifest fix by default (affects Docker 18.x, 19.x, 29.x)
+		cfg.Compatibility.DockerClientWorkarounds.EnableDocker29ManifestFix = true
+
 		if cfg.Compatibility.DockerClientWorkarounds.MaxManifestSize == 0 {
 			cfg.Compatibility.DockerClientWorkarounds.MaxManifestSize = 10 * 1024 * 1024 // 10MB
 		}
