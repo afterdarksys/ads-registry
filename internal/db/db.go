@@ -75,6 +75,9 @@ type Store interface {
 	ListReferrers(ctx context.Context, subjectDigest string, artifactType string) ([]ReferrerDescriptor, error)
 	ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]ArtifactDescriptor, error)
 
+	// Multi-format artifact methods
+	ArtifactStore
+
 	Close() error
 }
 

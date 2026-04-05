@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -188,6 +189,31 @@ func (m *MockStore) DeletePolicy(ctx context.Context, id int) error {
 	return nil
 }
 
+func (m *MockStore) CreateArtifact(ctx context.Context, artifact *UniversalArtifact) (int64, error) {
+	return 0, nil
+}
+
+func (m *MockStore) GetArtifact(ctx context.Context, format, namespace, packageName, version string) (*UniversalArtifact, error) {
+	return nil, ErrNotFound
+}
+
+func (m *MockStore) ListArtifacts(ctx context.Context, format, namespace, packageName string) ([]*UniversalArtifact, error) {
+	return []*UniversalArtifact{}, nil
+}
+
+func (m *MockStore) SearchArtifacts(ctx context.Context, format, namespace string, searchQuery json.RawMessage) ([]*UniversalArtifact, error) {
+	return []*UniversalArtifact{}, nil
+}
+
+func (m *MockStore) StoreArtifactMetadata(ctx context.Context, artifactID int64, data json.RawMessage) error {
+	return nil
+}
+
+func (m *MockStore) AttachBlob(ctx context.Context, artifactID int64, blobDigest, fileName string) error {
+	return nil
+}
+
 func (m *MockStore) Close() error {
 	return nil
 }
+

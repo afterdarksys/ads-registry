@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -131,6 +132,33 @@ func (s *SQLiteStore) migrate() error {
 		expression TEXT UNIQUE NOT NULL
 	);
 
+	-- Universal Artifacts (NPM, PyPI, Helm, Go, APT, etc.)
+	CREATE TABLE IF NOT EXISTS universal_artifacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		format TEXT NOT NULL,
+		namespace TEXT NOT NULL,
+		package_name TEXT NOT NULL,
+		version TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (format, namespace, package_name, version)
+	);
+
+	CREATE TABLE IF NOT EXISTS universal_artifact_blobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		artifact_id INTEGER NOT NULL REFERENCES universal_artifacts(id) ON DELETE CASCADE,
+		blob_digest TEXT NOT NULL,
+		file_name TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(artifact_id, blob_digest)
+	);
+
+	CREATE TABLE IF NOT EXISTS universal_artifact_metadata (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		artifact_id INTEGER NOT NULL REFERENCES universal_artifacts(id) ON DELETE CASCADE,
+		raw_data TEXT NOT NULL,
+		UNIQUE(artifact_id)
+	);
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -140,6 +168,8 @@ func (s *SQLiteStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_scan_reports_created_at ON scan_reports(created_at);
 	CREATE INDEX IF NOT EXISTS idx_repositories_namespace_id ON repositories(namespace_id);
 	CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
+	CREATE INDEX IF NOT EXISTS idx_universal_artifacts_lookup ON universal_artifacts(format, namespace, package_name);
+	CREATE INDEX IF NOT EXISTS idx_universal_artifact_blobs_artifact ON universal_artifact_blobs(artifact_id);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -883,4 +913,308 @@ func parseRepoPath(repoPath string) (namespace, repo string) {
 		repo = repoPath
 	}
 	return
+}
+// --------------------------------------------------------------------------------
+// Multi-format Artifacts (Not supported in SQLite)
+// --------------------------------------------------------------------------------
+// CreateArtifact registers a new package version into the generic repository
+func (s *SQLiteStore) CreateArtifact(ctx context.Context, artifact *db.UniversalArtifact) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO universal_artifacts (format, namespace, package_name, version)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (format, namespace, package_name, version) DO UPDATE SET version = excluded.version
+	`, artifact.Format, artifact.Namespace, artifact.PackageName, artifact.Version)
+
+	if err != nil {
+		return 0, err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		// If ON CONFLICT triggered, get the existing ID
+		var existingID int64
+		err = s.db.QueryRowContext(ctx, `
+			SELECT id FROM universal_artifacts
+			WHERE format = ? AND namespace = ? AND package_name = ? AND version = ?
+		`, artifact.Format, artifact.Namespace, artifact.PackageName, artifact.Version).Scan(&existingID)
+		if err != nil {
+			return 0, err
+		}
+		id = existingID
+	}
+
+	if artifact.Metadata != nil && len(artifact.Metadata) > 0 {
+		err = s.StoreArtifactMetadata(ctx, id, artifact.Metadata)
+	}
+
+	return id, err
+}
+
+// GetArtifact retrieves a specific version of a package
+func (s *SQLiteStore) GetArtifact(ctx context.Context, format, namespace, packageName, version string) (*db.UniversalArtifact, error) {
+	artifact := &db.UniversalArtifact{}
+	var metadata sql.NullString
+	var createdAt string
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
+		FROM universal_artifacts a
+		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
+		WHERE a.format = ? AND a.namespace = ? AND a.package_name = ? AND a.version = ?
+	`, format, namespace, packageName, version).Scan(
+		&artifact.ID, &artifact.Format, &artifact.Namespace, &artifact.PackageName, &artifact.Version, &createdAt, &metadata,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, db.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse timestamp
+	artifact.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+
+	if metadata.Valid {
+		artifact.Metadata = json.RawMessage(metadata.String)
+	}
+
+	// Fetch blobs
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT blob_digest, file_name, created_at
+		FROM universal_artifact_blobs
+		WHERE artifact_id = ?
+	`, artifact.ID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var b db.ArtifactBlob
+			var blobCreatedAt string
+			b.ArtifactID = artifact.ID
+			if err := rows.Scan(&b.BlobDigest, &b.FileName, &blobCreatedAt); err == nil {
+				b.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", blobCreatedAt)
+				artifact.Blobs = append(artifact.Blobs, b)
+			}
+		}
+	}
+
+	return artifact, nil
+}
+
+// ListArtifacts returns all versions for a package
+func (s *SQLiteStore) ListArtifacts(ctx context.Context, format, namespace, packageName string) ([]*db.UniversalArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
+		FROM universal_artifacts a
+		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
+		WHERE a.format = ? AND a.namespace = ? AND a.package_name = ?
+		ORDER BY a.created_at DESC
+	`, format, namespace, packageName)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []*db.UniversalArtifact
+	for rows.Next() {
+		artifact := &db.UniversalArtifact{}
+		var metadata sql.NullString
+		var createdAt string
+		if err := rows.Scan(&artifact.ID, &artifact.Format, &artifact.Namespace, &artifact.PackageName, &artifact.Version, &createdAt, &metadata); err != nil {
+			return nil, err
+		}
+		artifact.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if metadata.Valid {
+			artifact.Metadata = json.RawMessage(metadata.String)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+
+	return artifacts, rows.Err()
+}
+
+// SearchArtifacts allows querying artifacts (basic implementation for SQLite)
+func (s *SQLiteStore) SearchArtifacts(ctx context.Context, format, namespace string, searchQuery json.RawMessage) ([]*db.UniversalArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
+		FROM universal_artifacts a
+		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
+		WHERE a.format = ? AND a.namespace = ?
+		ORDER BY a.package_name ASC, a.created_at DESC
+	`, format, namespace)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []*db.UniversalArtifact
+	for rows.Next() {
+		artifact := &db.UniversalArtifact{}
+		var metadata sql.NullString
+		var createdAt string
+		if err := rows.Scan(&artifact.ID, &artifact.Format, &artifact.Namespace, &artifact.PackageName, &artifact.Version, &createdAt, &metadata); err != nil {
+			return nil, err
+		}
+		artifact.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if metadata.Valid {
+			artifact.Metadata = json.RawMessage(metadata.String)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, rows.Err()
+}
+
+// StoreArtifactMetadata saves format-specific JSON metadata
+func (s *SQLiteStore) StoreArtifactMetadata(ctx context.Context, artifactID int64, data json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO universal_artifact_metadata (artifact_id, raw_data)
+		VALUES (?, ?)
+		ON CONFLICT (artifact_id) DO UPDATE SET raw_data = excluded.raw_data
+	`, artifactID, string(data))
+	return err
+}
+
+// AttachBlob links a stored blob to the artifact
+func (s *SQLiteStore) AttachBlob(ctx context.Context, artifactID int64, blobDigest, fileName string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO universal_artifact_blobs (artifact_id, blob_digest, file_name)
+		VALUES (?, ?, ?)
+		ON CONFLICT (artifact_id, blob_digest) DO NOTHING
+	`, artifactID, blobDigest, fileName)
+	return err
+}
+
+// DeleteArtifact removes a specific version of a package
+func (s *SQLiteStore) DeleteArtifact(ctx context.Context, format, namespace, packageName, version string) error {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM universal_artifacts
+		WHERE format = ? AND namespace = ? AND package_name = ? AND version = ?
+	`, format, namespace, packageName, version)
+
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+
+	return nil
+}
+
+// DeleteAllArtifactVersions removes all versions of a package
+func (s *SQLiteStore) DeleteAllArtifactVersions(ctx context.Context, format, namespace, packageName string) error {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM universal_artifacts
+		WHERE format = ? AND namespace = ? AND package_name = ?
+	`, format, namespace, packageName)
+
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+
+	return nil
+}
+
+// GetPackageNames returns unique package names for a format and namespace
+func (s *SQLiteStore) GetPackageNames(ctx context.Context, format, namespace string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT package_name
+		FROM universal_artifacts
+		WHERE format = ? AND namespace = ?
+		ORDER BY package_name ASC
+	`, format, namespace)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+
+	return names, rows.Err()
+}
+
+// GetArtifactStatistics returns usage statistics for artifacts
+func (s *SQLiteStore) GetArtifactStatistics(ctx context.Context, format, namespace string) (*db.ArtifactStatistics, error) {
+	stats := &db.ArtifactStatistics{
+		FormatBreakdown: make(map[string]int64),
+	}
+
+	var query string
+	var args []interface{}
+
+	if format != "" && namespace != "" {
+		query = `
+			SELECT
+				COUNT(DISTINCT package_name) as packages,
+				COUNT(*) as versions
+			FROM universal_artifacts
+			WHERE format = ? AND namespace = ?
+		`
+		args = []interface{}{format, namespace}
+	} else if format != "" {
+		query = `
+			SELECT
+				COUNT(DISTINCT package_name) as packages,
+				COUNT(*) as versions
+			FROM universal_artifacts
+			WHERE format = ?
+		`
+		args = []interface{}{format}
+	} else {
+		query = `
+			SELECT
+				COUNT(DISTINCT package_name) as packages,
+				COUNT(*) as versions
+			FROM universal_artifacts
+		`
+	}
+
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&stats.TotalPackages, &stats.TotalVersions)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get format breakdown
+	breakdownRows, err := s.db.QueryContext(ctx, `
+		SELECT format, COUNT(*) as count
+		FROM universal_artifacts
+		GROUP BY format
+	`)
+	if err == nil {
+		defer breakdownRows.Close()
+		for breakdownRows.Next() {
+			var format string
+			var count int64
+			if err := breakdownRows.Scan(&format, &count); err == nil {
+				stats.FormatBreakdown[format] = count
+			}
+		}
+	}
+
+	return stats, nil
 }

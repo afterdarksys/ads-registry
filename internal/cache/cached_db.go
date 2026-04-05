@@ -310,6 +310,31 @@ func (s *CachedStore) DeletePolicy(ctx context.Context, id int) error {
 	return s.db.DeletePolicy(ctx, id)
 }
 
+// Multi-format Artifacts - passthrough
+func (s *CachedStore) CreateArtifact(ctx context.Context, artifact *db.UniversalArtifact) (int64, error) {
+	return s.db.CreateArtifact(ctx, artifact)
+}
+
+func (s *CachedStore) GetArtifact(ctx context.Context, format, namespace, packageName, version string) (*db.UniversalArtifact, error) {
+	return s.db.GetArtifact(ctx, format, namespace, packageName, version)
+}
+
+func (s *CachedStore) ListArtifacts(ctx context.Context, format, namespace, packageName string) ([]*db.UniversalArtifact, error) {
+	return s.db.ListArtifacts(ctx, format, namespace, packageName)
+}
+
+func (s *CachedStore) SearchArtifacts(ctx context.Context, format, namespace string, searchQuery json.RawMessage) ([]*db.UniversalArtifact, error) {
+	return s.db.SearchArtifacts(ctx, format, namespace, searchQuery)
+}
+
+func (s *CachedStore) StoreArtifactMetadata(ctx context.Context, artifactID int64, data json.RawMessage) error {
+	return s.db.StoreArtifactMetadata(ctx, artifactID, data)
+}
+
+func (s *CachedStore) AttachBlob(ctx context.Context, artifactID int64, blobDigest, fileName string) error {
+	return s.db.AttachBlob(ctx, artifactID, blobDigest, fileName)
+}
+
 func (s *CachedStore) Close() error {
 	return s.db.Close()
 }

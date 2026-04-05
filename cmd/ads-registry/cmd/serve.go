@@ -23,6 +23,8 @@ import (
 	apimw "github.com/ryan/ads-registry/internal/api/middleware"
 	tenancyAPI "github.com/ryan/ads-registry/internal/api/tenancy"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
+	"github.com/ryan/ads-registry/internal/api/formats"
+	"github.com/ryan/ads-registry/internal/api/artifacts"
 	registryAuth "github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/cache"
@@ -555,6 +557,21 @@ func runServer() {
 	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService, cfg.Server.DeveloperMode, ldapClient) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
 	v2api.SetWebhookDispatcher(wd)
 	v2api.Register(r)
+
+	// Multi-Format Artifact Registry API (NPM, PyPI, Apt, etc)
+	formatsRouter := formats.NewRouter(store, storageProvider, tokenService, cfg.Server.DeveloperMode)
+	formatsRouter.Register(r)
+
+	// Artifact Management API (for artifactadm CLI)
+	artifactsAPI := artifacts.NewHandler(store)
+	r.Route("/api/v1/artifacts", func(api chi.Router) {
+		api.Use(v2api.Authenticate) // Reuse V2 authentication middleware
+		api.Mount("/", artifactsAPI.Router())
+	})
+	r.Route("/api/v1", func(api chi.Router) {
+		api.Use(v2api.Authenticate)
+		artifactsAPI.RegisterStatsRoute(api)
+	})
 
 	// OAuth2 Authentication API for Web UI
 	oauth2Router := auth.NewOAuth2Router(store, tokenService)
