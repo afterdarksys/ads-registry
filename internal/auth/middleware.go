@@ -15,14 +15,16 @@ type userContextKey string
 var UserContext = userContextKey("user")
 
 type Middleware struct {
-	tokenService *TokenService
-	serviceName  string
+	tokenService  *TokenService
+	serviceName   string
+	developerMode bool
 }
 
-func NewMiddleware(ts *TokenService) *Middleware {
+func NewMiddleware(ts *TokenService, developerMode bool) *Middleware {
 	return &Middleware{
-		tokenService: ts,
-		serviceName:  ts.service,
+		tokenService:  ts,
+		serviceName:   ts.service,
+		developerMode: developerMode,
 	}
 }
 
@@ -57,6 +59,12 @@ func GetScheme(r *http.Request) string {
 func (m *Middleware) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme := GetScheme(r)
+
+		if m.developerMode {
+			logger.Debug("DeveloperMode bypass active in Protect router")
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		// Bypass auth challenge if hitting /v2/ root without token
 		if r.URL.Path == "/v2/" && r.Header.Get("Authorization") == "" {
@@ -158,6 +166,12 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 
 func (m *Middleware) ProtectAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.developerMode {
+			logger.Debug("DeveloperMode bypass active in ProtectAdmin router")
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "Unauthorized: missing or invalid token", http.StatusUnauthorized)

@@ -5,7 +5,7 @@ set -euo pipefail
 
 # Directory of this script (project root)
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BIN_DIR="$PROJECT_ROOT/bin"
+BIN_DIR="$PROJECT_ROOT/build"
 
 # List of command packages to build
 CMD_PACKAGES=(

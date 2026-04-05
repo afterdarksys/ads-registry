@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -40,30 +41,67 @@ func NewEnforcer(store db.Store) (*Enforcer, error) {
 		return nil, fmt.Errorf("failed to create CEL env: %v", err)
 	}
 
-	return &Enforcer{
+	enforcer := &Enforcer{
 		env:   env,
 		rules: []cel.Program{},
 		db:    store,
-	}, nil
+	}
+
+	// Load policies from the database
+	if err := enforcer.ReloadPolicies(context.Background()); err != nil {
+		log.Printf("[Policy] Warning: Failed to load policies from DB: %v", err)
+	}
+
+	return enforcer, nil
 }
 
-// AddRule compiles and adds a raw CEL expression (e.g., `request.namespace == "trusted"`)
-func (e *Enforcer) AddRule(expression string) error {
+// ReloadPolicies clears the current rules and reloads them from the database
+func (e *Enforcer) ReloadPolicies(ctx context.Context) error {
+	policies, err := e.db.ListPolicies(ctx)
+	if err != nil {
+		return err
+	}
+
+	var parsedRules []cel.Program
+	for _, p := range policies {
+		ast, issues := e.env.Compile(p.Expression)
+		if issues != nil && issues.Err() != nil {
+			log.Printf("[Policy] Failed to compile policy config ID %d: %v", p.ID, issues.Err())
+			continue
+		}
+		prg, err := e.env.Program(ast)
+		if err != nil {
+			log.Printf("[Policy] Failed to program policy config ID %d: %v", p.ID, err)
+			continue
+		}
+		parsedRules = append(parsedRules, prg)
+	}
+
+	e.mu.Lock()
+	e.rules = parsedRules
+	e.mu.Unlock()
+
+	return nil
+}
+
+// AddRule compiles and adds a raw CEL expression to the database and reloads
+func (e *Enforcer) AddRule(ctx context.Context, expression string) error {
 	ast, issues := e.env.Compile(expression)
 	if issues != nil && issues.Err() != nil {
 		return fmt.Errorf("compile error: %s", issues.Err())
 	}
 
-	prg, err := e.env.Program(ast)
+	_, err := e.env.Program(ast)
 	if err != nil {
 		return fmt.Errorf("program error: %s", err)
 	}
 
-	e.mu.Lock()
-	e.rules = append(e.rules, prg)
-	e.mu.Unlock()
+	// Persist to DB
+	if err := e.db.AddPolicy(ctx, expression); err != nil {
+		return fmt.Errorf("failed to persist policy: %v", err)
+	}
 
-	return nil
+	return e.ReloadPolicies(ctx)
 }
 
 // Protect blocks any OCI Pull/Push if any CEL rule evaluates to false

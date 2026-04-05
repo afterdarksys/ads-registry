@@ -74,7 +74,7 @@ type Config struct {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Println("ads-registry-credential-provider v1.0.0")
+		fmt.Println("ads-registry-credential-provider v1.1.0")
 		fmt.Println("API Version:", apiVersion)
 		os.Exit(0)
 	}

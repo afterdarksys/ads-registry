@@ -29,10 +29,18 @@ var addPolicyCmd = &cobra.Command{
 	Run:   runAddPolicy,
 }
 
+var deletePolicyCmd = &cobra.Command{
+	Use:   "delete [id]",
+	Short: "Delete a policy",
+	Args:  cobra.ExactArgs(1),
+	Run:   runDeletePolicy,
+}
+
 func init() {
 	rootCmd.AddCommand(policiesCmd)
 	policiesCmd.AddCommand(listPoliciesCmd)
 	policiesCmd.AddCommand(addPolicyCmd)
+	policiesCmd.AddCommand(deletePolicyCmd)
 }
 
 func runListPolicies(cmd *cobra.Command, args []string) {
@@ -44,7 +52,10 @@ func runListPolicies(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	var policies []map[string]string
+	var policies []struct {
+		ID         int    `json:"id"`
+		Expression string `json:"expression"`
+	}
 
 	if err := json.Unmarshal(data, &policies); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
@@ -57,9 +68,9 @@ func runListPolicies(cmd *cobra.Command, args []string) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "EXPRESSION")
+	fmt.Fprintln(w, "ID\tEXPRESSION")
 	for _, p := range policies {
-		fmt.Fprintf(w, "%s\n", p["expression"])
+		fmt.Fprintf(w, "%d\t%s\n", p.ID, p.Expression)
 	}
 	w.Flush()
 }
@@ -79,4 +90,17 @@ func runAddPolicy(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Printf("Policy added successfully: %s\n", expression)
+}
+
+func runDeletePolicy(cmd *cobra.Command, args []string) {
+	id := args[0]
+	client := NewAPIClient()
+
+	_, err := client.Delete(fmt.Sprintf("/api/v1/management/policies/%s", id))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Policy %s deleted successfully\n", id)
 }

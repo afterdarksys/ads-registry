@@ -126,6 +126,11 @@ func (s *SQLiteStore) migrate() error {
 		used_bytes BIGINT NOT NULL DEFAULT 0
 	);
 
+	CREATE TABLE IF NOT EXISTS policies (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		expression TEXT UNIQUE NOT NULL
+	);
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -209,6 +214,44 @@ func (s *SQLiteStore) ListRepositories(ctx context.Context, limit int, last stri
 		}
 	}
 	return repos, rows.Err()
+}
+
+func (s *SQLiteStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var policies []db.PolicyRecord
+	for rows.Next() {
+		var p db.PolicyRecord
+		if err := rows.Scan(&p.ID, &p.Expression); err != nil {
+			return nil, err
+		}
+		policies = append(policies, p)
+	}
+	return policies, rows.Err()
+}
+
+func (s *SQLiteStore) AddPolicy(ctx context.Context, expression string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO policies (expression) VALUES (?) ON CONFLICT(expression) DO NOTHING`, expression)
+	return err
+}
+
+func (s *SQLiteStore) DeletePolicy(ctx context.Context, id int) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM policies WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLiteStore) ListTags(ctx context.Context, repo string, limit int, last string) ([]string, error) {

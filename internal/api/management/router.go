@@ -29,11 +29,11 @@ type Router struct {
 	starlark *automation.Engine
 }
 
-func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine) *Router {
+func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, devMode bool) *Router {
 	return &Router{
 		db:       dbStore,
 		tokenTs:  ts,
-		authMid:  auth.NewMiddleware(ts),
+		authMid:  auth.NewMiddleware(ts, devMode),
 		enforcer: enf,
 		starlark: star,
 	}
@@ -104,12 +104,15 @@ func (r *Router) Register(mux chi.Router) {
 			// Policies
 			adminAPI.Get("/policies", r.listPolicies)
 			adminAPI.Post("/policies", r.addPolicy)
+			adminAPI.Delete("/policies/{id}", r.deletePolicy)
 
 			// Scripts
 			adminAPI.Get("/scripts", r.listScripts)
 			adminAPI.Get("/scripts/{name}", r.getScript)
 			adminAPI.Put("/scripts/{name}", r.putScript)
 			adminAPI.Delete("/scripts/{name}", r.deleteScript)
+			adminAPI.Post("/scripts/{name}/enable", r.enableScript)
+			adminAPI.Post("/scripts/{name}/disable", r.disableScript)
 		})
 
 	})
@@ -472,8 +475,12 @@ func (r *Router) getScanReport(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) listPolicies(w http.ResponseWriter, req *http.Request) {
-	// Dummy for now until DB table connects
-	json.NewEncoder(w).Encode([]map[string]string{})
+	policies, err := r.db.ListPolicies(req.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(policies)
 }
 
 func (r *Router) addPolicy(w http.ResponseWriter, req *http.Request) {
@@ -484,27 +491,62 @@ func (r *Router) addPolicy(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := r.enforcer.AddRule(payload.Expression); err != nil {
+	if err := r.enforcer.AddRule(req.Context(), payload.Expression); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (r *Router) listScripts(w http.ResponseWriter, req *http.Request) {
-	files, err := os.ReadDir("scripts")
+func (r *Router) deletePolicy(w http.ResponseWriter, req *http.Request) {
+	idStr := chi.URLParam(req, "id")
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		if os.IsNotExist(err) {
-			json.NewEncoder(w).Encode([]string{})
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.db.DeletePolicy(req.Context(), id); err != nil {
+		if err == db.ErrNotFound {
+			http.Error(w, "policy not found", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var scripts []string
+
+	// Reload the enforcer rules memory
+	r.enforcer.ReloadPolicies(req.Context())
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (r *Router) listScripts(w http.ResponseWriter, req *http.Request) {
+	files, err := os.ReadDir("scripts")
+	if err != nil {
+		if os.IsNotExist(err) {
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var scripts []map[string]interface{}
 	for _, f := range files {
-		if !f.IsDir() && filepath.Ext(f.Name()) == ".star" {
-			scripts = append(scripts, f.Name())
+		if !f.IsDir() {
+			name := f.Name()
+			if strings.HasSuffix(name, ".star") {
+				scripts = append(scripts, map[string]interface{}{
+					"name":    name,
+					"enabled": true,
+				})
+			} else if strings.HasSuffix(name, ".star.disabled") {
+				originalName := strings.TrimSuffix(name, ".disabled")
+				scripts = append(scripts, map[string]interface{}{
+					"name":    originalName,
+					"enabled": false,
+				})
+			}
 		}
 	}
 	json.NewEncoder(w).Encode(scripts)
@@ -550,6 +592,50 @@ func (r *Router) putScript(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := os.WriteFile(filepath.Join("scripts", name), content, 0644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (r *Router) enableScript(w http.ResponseWriter, req *http.Request) {
+	name := chi.URLParam(req, "name")
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		http.Error(w, "invalid script name", http.StatusBadRequest)
+		return
+	}
+
+	oldPath := filepath.Join("scripts", name+".disabled")
+	newPath := filepath.Join("scripts", name)
+
+	if err := os.Rename(oldPath, newPath); err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "script is already enabled or does not exist", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (r *Router) disableScript(w http.ResponseWriter, req *http.Request) {
+	name := chi.URLParam(req, "name")
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		http.Error(w, "invalid script name", http.StatusBadRequest)
+		return
+	}
+
+	oldPath := filepath.Join("scripts", name)
+	newPath := filepath.Join("scripts", name+".disabled")
+
+	if err := os.Rename(oldPath, newPath); err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "script is already disabled or does not exist", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

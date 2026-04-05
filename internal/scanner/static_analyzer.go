@@ -168,7 +168,7 @@ func (s *StaticAnalyzer) convertToScannerReport(staticReport *StaticAnalysisRepo
 	return &Report{
 		Digest:          staticReport.Digest,
 		ScannerName:     "semgrep-static-analysis",
-		ScannerVersion:  "1.0.0",
+		ScannerVersion:  "1.1.0",
 		CreatedAt:       staticReport.ScanTime,
 		Vulnerabilities: vulns,
 	}

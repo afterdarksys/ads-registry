@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/ryan/ads-registry/internal/api/auth"
 	"github.com/ryan/ads-registry/internal/api/management"
+	apimw "github.com/ryan/ads-registry/internal/api/middleware"
 	tenancyAPI "github.com/ryan/ads-registry/internal/api/tenancy"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
 	registryAuth "github.com/ryan/ads-registry/internal/auth"
@@ -417,8 +419,20 @@ func runServer() {
 	// 7. Rate limiting (increased to 10000 for OCI migration)
 	r.Use(httprate.LimitByIP(10000, 1*time.Minute))
 
+	// Developer Mode Overrides
+	if cfg.Server.DeveloperMode {
+		logger.Info("DEVELOPER MODE ACTIVATED: Security bypassed, trace dumping enabled, pprof exposing on /debug/pprof")
+		r.Use(apimw.OCIDebugger())
+		
+		r.HandleFunc("/debug/pprof/", pprof.Index)
+		r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
+
 	// Management & Observability
-	healthHandler := health.NewHandler("1.0.0")
+	healthHandler := health.NewHandler("1.1.0")
 	// Register health checks
 	healthHandler.RegisterLiveness("uptime", health.UptimeChecker(time.Now()))
 	// TODO: Add database and storage checkers for readiness
@@ -496,8 +510,8 @@ func runServer() {
 		log.Fatalf("failed to init CEL enforcer: %v", err)
 	}
 	// Add default example whitelist/blacklist rules
-	enf.AddRule(`request.namespace != "blacklist"`)
-	enf.AddRule(`request.method == "GET" || request.namespace == "trusted"`)
+	enf.AddRule(context.Background(), `request.namespace != "blacklist"`)
+	enf.AddRule(context.Background(), `request.method == "GET" || request.namespace == "trusted"`)
 
 	// 3. Initialize Auth Token Service
 	tokenService, err := registryAuth.NewTokenService(cfg.Auth)
@@ -506,6 +520,12 @@ func runServer() {
 		log.Fatalf("failed to init token service: %v", err)
 	}
 	logger.Info("Token service initialized successfully")
+
+	var ldapClient *registryAuth.LDAPClient
+	if cfg.Auth.LDAP.Enabled {
+		ldapClient = registryAuth.NewLDAPClient(cfg.Auth.LDAP)
+		logger.Info("LDAP client initialized successfully")
+	}
 
 	// 4. Starlark Embedded Automation
 	starEng := automation.NewEngine()
@@ -532,7 +552,7 @@ func runServer() {
 		logger.Info("DarkScan vulnerability scanner enabled")
 	}
 
-	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService, cfg.Server.DeveloperMode, ldapClient) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
 	v2api.SetWebhookDispatcher(wd)
 	v2api.Register(r)
 
@@ -552,7 +572,7 @@ func runServer() {
 	}
 
 	// Admin Dashboard Management API
-	managementRouter := management.NewRouter(store, tokenService, enf, starEng)
+	managementRouter := management.NewRouter(store, tokenService, enf, starEng, cfg.Server.DeveloperMode)
 	managementRouter.Register(r)
 
 	// Multi-Tenancy Management API (PostgreSQL only)

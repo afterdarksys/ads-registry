@@ -59,6 +59,11 @@ type Store interface {
 	UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error
 	ListQuotas(ctx context.Context) ([]Quota, error)
 
+	// CEL Policies
+	ListPolicies(ctx context.Context) ([]PolicyRecord, error)
+	AddPolicy(ctx context.Context, expression string) error
+	DeletePolicy(ctx context.Context, id int) error
+
 	// Upstream Registries
 	GetUpstream(ctx context.Context, id int) (map[string]interface{}, error)
 	GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error)
@@ -108,6 +113,11 @@ type ScanReport struct {
 	Digest  string
 	Scanner string
 	Data    []byte
+}
+
+type PolicyRecord struct {
+	ID         int    `json:"id"`
+	Expression string `json:"expression"`
 }
 
 type ManifestRecord struct {

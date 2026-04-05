@@ -298,6 +298,18 @@ func (s *CachedStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int
 	return s.db.UpdateAccessTokenLastUsed(ctx, tokenID)
 }
 
+func (s *CachedStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, error) {
+	return s.db.ListPolicies(ctx)
+}
+
+func (s *CachedStore) AddPolicy(ctx context.Context, expression string) error {
+	return s.db.AddPolicy(ctx, expression)
+}
+
+func (s *CachedStore) DeletePolicy(ctx context.Context, id int) error {
+	return s.db.DeletePolicy(ctx, id)
+}
+
 func (s *CachedStore) Close() error {
 	return s.db.Close()
 }

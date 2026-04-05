@@ -137,6 +137,10 @@ func (s *PostgresStore) migrate() error {
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE TABLE IF NOT EXISTS policies (
+		id SERIAL PRIMARY KEY,
+		expression TEXT UNIQUE NOT NULL
+	);
 
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
@@ -222,6 +226,44 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit int, last st
 		}
 	}
 	return repos, rows.Err()
+}
+
+func (s *PostgresStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var policies []db.PolicyRecord
+	for rows.Next() {
+		var p db.PolicyRecord
+		if err := rows.Scan(&p.ID, &p.Expression); err != nil {
+			return nil, err
+		}
+		policies = append(policies, p)
+	}
+	return policies, rows.Err()
+}
+
+func (s *PostgresStore) AddPolicy(ctx context.Context, expression string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO policies (expression) VALUES ($1) ON CONFLICT(expression) DO NOTHING`, expression)
+	return err
+}
+
+func (s *PostgresStore) DeletePolicy(ctx context.Context, id int) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM policies WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListTags(ctx context.Context, repo string, limit int, last string) ([]string, error) {

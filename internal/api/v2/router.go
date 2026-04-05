@@ -39,13 +39,15 @@ type Router struct {
 	syncManager   *sync.Manager
 	scanner       *scanner.Service
 	webhook       *webhooks.Dispatcher
+	developerMode bool
+	ldapClient    *auth.LDAPClient
 }
 
 func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
 	r.webhook = wd
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
 		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
@@ -55,19 +57,21 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		db:            dbStore,
 		storage:       storageProvider,
 		tokenTs:       ts,
-		authMid:       auth.NewMiddleware(ts),
+		authMid:       auth.NewMiddleware(ts, devMode),
 		enforcer:      enf,
 		scanner:       scannerSvc,
 		starlark:      star,
 		upstreamProxy: upstreamProxy,
 		syncManager:   syncMgr,
+		developerMode: devMode,
+		ldapClient:    ldapClient,
 	}
 }
 
 func (r *Router) Register(mux chi.Router) {
 
 	// The Auth Endpoint
-	authHandler := auth.NewHandler(r.tokenTs, r.db)
+	authHandler := auth.NewHandler(r.tokenTs, r.db, r.ldapClient)
 	authHandler.Register(mux)
 
 	// API Endpoints
@@ -187,6 +191,13 @@ func (r *Router) Register(mux chi.Router) {
 }
 
 func (r *Router) baseCheck(w http.ResponseWriter, req *http.Request) {
+	if r.developerMode {
+		w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+		return
+	}
+
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 
 	// If no auth provided, tell Docker where to get a token

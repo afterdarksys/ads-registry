@@ -176,6 +176,18 @@ func (m *MockStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) 
 	return nil
 }
 
+func (m *MockStore) ListPolicies(ctx context.Context) ([]PolicyRecord, error) {
+	return []PolicyRecord{}, nil
+}
+
+func (m *MockStore) AddPolicy(ctx context.Context, expression string) error {
+	return nil
+}
+
+func (m *MockStore) DeletePolicy(ctx context.Context, id int) error {
+	return nil
+}
+
 func (m *MockStore) Close() error {
 	return nil
 }

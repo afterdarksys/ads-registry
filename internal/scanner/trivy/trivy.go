@@ -40,7 +40,7 @@ func (t *EmbeddedScanner) Scan(ctx context.Context, namespace, repo, digest stri
 			{
 				ID:          "CVE-2023-MOCK",
 				Package:     "demo-lib",
-				Version:     "1.0.0",
+				Version:     "1.1.0",
 				FixVersion:  "1.0.1",
 				Severity:    "HIGH",
 				Description: "This is a mock vulnerability demonstrating the Trivy scanner interface",

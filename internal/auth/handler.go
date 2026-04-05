@@ -15,12 +15,14 @@ import (
 type Handler struct {
 	tokenService *TokenService
 	db           db.Store
+	ldapClient   *LDAPClient
 }
 
-func NewHandler(ts *TokenService, dbStore db.Store) *Handler {
+func NewHandler(ts *TokenService, dbStore db.Store, ldapClient *LDAPClient) *Handler {
 	return &Handler{
 		tokenService: ts,
 		db:           dbStore,
+		ldapClient:   ldapClient,
 	}
 }
 
@@ -100,8 +102,39 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		user = actualUsername // Use actual username for JWT
 		log.Printf("[AUTH] Access token authentication successful for user %s (token: %s)", actualUsername, validToken.Name)
 	} else {
-		// 3. Authenticate user with password
-		dbUser, err = h.db.AuthenticateUser(req.Context(), user, pass)
+		// 3. Authenticate user with password (LDAP first, then DB)
+		var ldapAuthSuccess bool
+		if h.ldapClient != nil {
+			scopes, ldapErr := h.ldapClient.AuthenticateAndFetch(user, pass)
+			if ldapErr == nil {
+				ldapAuthSuccess = true
+				log.Printf("[AUTH] LDAP authentication successful for user %s", user)
+				
+				// Ensure user is provisioned in local DB to bridge scopes
+				dbUser, err = h.db.GetUserByUsername(req.Context(), user)
+				if err != nil {
+					log.Printf("[AUTH] Auto-provisioning LDAP user %s in local DB", user)
+					err = h.db.CreateUser(req.Context(), user, "ldap_managed_user", scopes)
+					if err != nil {
+						log.Printf("[AUTH] Failed to provision LDAP user: %v", err)
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+						return
+					}
+					dbUser, _ = h.db.GetUserByUsername(req.Context(), user)
+				} else {
+					// Update scopes based on LDAP groups if mapped
+					if len(scopes) > 0 {
+						h.db.UpdateUser(req.Context(), user, scopes)
+						dbUser.Scopes = scopes
+					}
+				}
+			} else if ldapErr.Error() != "LDAP is not enabled" {
+				log.Printf("[AUTH] LDAP auth failed for %s: %v", user, ldapErr)
+			}
+		}
+
+		if !ldapAuthSuccess {
+			dbUser, err = h.db.AuthenticateUser(req.Context(), user, pass)
 		if err != nil {
 			// Bootstrap fallback: Allow admin/admin if no users exist
 			if user == "admin" && pass == "admin" {
@@ -120,6 +153,7 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
+		}
 		}
 	}
 

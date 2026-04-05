@@ -29,7 +29,7 @@ func TestRouterPathMatching(t *testing.T) {
 		t.Fatalf("Failed to create token service: %v", err)
 	}
 
-	router := NewRouter(dbStore, storageProvider, tokenService, nil, nil, nil, nil, nil)
+	router := NewRouter(dbStore, storageProvider, tokenService, nil, nil, nil, nil, nil, false, nil)
 
 	mux := chi.NewRouter()
 	router.Register(mux)

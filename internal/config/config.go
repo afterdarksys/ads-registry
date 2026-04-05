@@ -37,6 +37,7 @@ type ServerConfig struct {
 	IdleTimeout       time.Duration `json:"idle_timeout"`
 	ReadHeaderTimeout time.Duration `json:"read_header_timeout"`
 	MaxHeaderBytes    int           `json:"max_header_bytes"`
+	DeveloperMode     bool          `json:"developer_mode"`
 	TLS               TLSConfig     `json:"tls"`
 }
 
@@ -104,6 +105,20 @@ type AuthConfig struct {
 	PublicKey       string        `json:"public_key_path"`
 	TokenExpiration time.Duration `json:"token_expiration"` // Duration before tokens expire (default: 24h)
 	OIDC            OIDCConfig    `json:"oidc"`
+	LDAP            LDAPConfig    `json:"ldap"`
+}
+
+type LDAPConfig struct {
+	Enabled             bool                `json:"enabled"`
+	Server              string              `json:"server"`   // e.g., "ldap.example.com:389"
+	UseSSL              bool                `json:"use_ssl"`
+	InsecureSkipVerify  bool                `json:"insecure_skip_verify"`
+	BindDN              string              `json:"bind_dn"`
+	BindPassword        string              `json:"bind_password"`
+	BaseDN              string              `json:"base_dn"`
+	UserSearchFilter    string              `json:"user_search_filter"`     // e.g., "(uid=%s)"
+	GroupSearchFilter   string              `json:"group_search_filter"`    // e.g., "(memberUid=%s)"
+	GroupToScopeMapping map[string][]string `json:"group_to_scope_mapping"` // Maps LDAP groups to registry scopes
 }
 
 type OIDCConfig struct {
@@ -361,6 +376,13 @@ func LoadFile(path string) (*Config, error) {
 	// Auth defaults
 	if cfg.Auth.TokenExpiration == 0 {
 		cfg.Auth.TokenExpiration = 24 * time.Hour // Default 24 hours
+	}
+
+	// LDAP defaults
+	if cfg.Auth.LDAP.Enabled {
+		if cfg.Auth.LDAP.UserSearchFilter == "" {
+			cfg.Auth.LDAP.UserSearchFilter = "(uid=%s)"
+		}
 	}
 
 	// DarkScan defaults

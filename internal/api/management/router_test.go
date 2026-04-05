@@ -23,7 +23,7 @@ func TestManagementRouting(t *testing.T) {
 		t.Fatalf("Failed to create token service: %v", err)
 	}
 
-	router := NewRouter(dbStore, tokenService, nil, nil)
+	router := NewRouter(dbStore, tokenService, nil, nil, false)
 	mux := chi.NewRouter()
 	router.Register(mux)
 
