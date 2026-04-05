@@ -94,6 +94,20 @@ func (s *CachedStore) PutManifest(ctx context.Context, repo, reference string, m
 	return nil
 }
 
+// DeleteManifest removes a manifest and invalidates cache
+func (s *CachedStore) DeleteManifest(ctx context.Context, repo, reference string) error {
+	if err := s.db.DeleteManifest(ctx, repo, reference); err != nil {
+		return err
+	}
+
+	if s.cache != nil {
+		cacheKey := BuildManifestKey("", repo, reference)
+		s.cache.Delete(ctx, cacheKey)
+	}
+
+	return nil
+}
+
 // GetScanReport retrieves a scan report with caching
 func (s *CachedStore) GetScanReport(ctx context.Context, digest string, scanner string) ([]byte, error) {
 	// Try cache first

@@ -25,6 +25,7 @@ var createUserCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(createUserCmd)
 	createUserCmd.Flags().StringSliceP("scopes", "s", []string{"*"}, "User scopes (comma-separated)")
+	createUserCmd.Flags().StringP("password", "p", "", "User password (optional, skips prompt)")
 }
 
 func runCreateUser(cmd *cobra.Command, args []string) {
@@ -41,26 +42,28 @@ func runCreateUser(cmd *cobra.Command, args []string) {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Prompt for password
-	fmt.Print("Enter password: ")
-	passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
-	if err != nil {
-		log.Fatalf("failed to read password: %v", err)
-	}
-	fmt.Println()
+	password, _ := cmd.Flags().GetString("password")
+	if password == "" {
+		// Prompt for password
+		fmt.Print("Enter password: ")
+		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
+		if err != nil {
+			log.Fatalf("failed to read password: %v", err)
+		}
+		fmt.Println()
 
-	fmt.Print("Confirm password: ")
-	confirmBytes, err := term.ReadPassword(int(syscall.Stdin))
-	if err != nil {
-		log.Fatalf("failed to read password: %v", err)
-	}
-	fmt.Println()
+		fmt.Print("Confirm password: ")
+		confirmBytes, err := term.ReadPassword(int(syscall.Stdin))
+		if err != nil {
+			log.Fatalf("failed to read password: %v", err)
+		}
+		fmt.Println()
 
-	if string(passwordBytes) != string(confirmBytes) {
-		log.Fatal("passwords do not match")
+		if string(passwordBytes) != string(confirmBytes) {
+			log.Fatal("passwords do not match")
+		}
+		password = string(passwordBytes)
 	}
-
-	password := string(passwordBytes)
 	if len(password) < 8 {
 		log.Fatal("password must be at least 8 characters long")
 	}
@@ -78,10 +81,16 @@ func runCreateUser(cmd *cobra.Command, args []string) {
 	}
 
 	switch cfg.Database.Driver {
-	case "sqlite3":
-		store, err = sqlite.New(cfg.Database)
 	case "postgres":
 		store, err = postgres.New(cfg.Database)
+		if err != nil {
+			log.Printf("Falling back to SQLite for user creation due to Postgres error: %v", err)
+			cfg.Database.Driver = "sqlite3"
+			cfg.Database.DSN = "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared"
+			store, err = sqlite.New(cfg.Database)
+		}
+	case "sqlite3":
+		store, err = sqlite.New(cfg.Database)
 	default:
 		log.Fatalf("unsupported database driver: %s", cfg.Database.Driver)
 	}

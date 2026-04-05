@@ -192,6 +192,10 @@ type CompatibilityConfig struct {
 
 	// Observability settings
 	Observability ObservabilityConfig `json:"observability"`
+
+	// Translation settings
+	EnableStreamingTranslation bool   `json:"enable_streaming_translation"`
+	TranslationDirection       string `json:"translation_direction"`
 }
 
 type DockerWorkaroundsConfig struct {

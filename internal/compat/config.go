@@ -291,7 +291,7 @@ func DefaultConfig() Config {
 			MinTLSVersion:        "1.2",
 			EnableLegacyCiphers:  false,
 			HTTP2Enabled:         true,
-			ForceHTTP1ForClients: []string{"Docker/29\\..*"},
+			ForceHTTP1ForClients: []string{`(?i)docker/v?29\..*`},
 			ALPNProtocols:        []string{"h2", "http/1.1"},
 			// Nuclear TLS options (disabled by default for security)
 			EnableCertificatePathValidation: false, // Only enable for broken clients

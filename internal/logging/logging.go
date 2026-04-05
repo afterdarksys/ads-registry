@@ -47,6 +47,7 @@ type LogEntry struct {
 	UserAgent   string                 `json:"user_agent,omitempty"`
 	RemoteAddr  string                 `json:"remote_addr,omitempty"`
 	Error       string                 `json:"error,omitempty"`
+	RequestID   string                 `json:"request_id,omitempty"`
 }
 
 // Config holds logging configuration
@@ -332,7 +333,7 @@ func (l *Logger) Critical(message string, err error, fields ...map[string]interf
 }
 
 // LogHTTPRequest logs an HTTP request with details
-func (l *Logger) LogHTTPRequest(r *http.Request, statusCode int, duration time.Duration) {
+func (l *Logger) LogHTTPRequest(r *http.Request, statusCode int, duration time.Duration, requestID string) {
 	entry := LogEntry{
 		Level:      "INFO",
 		Message:    "HTTP Request",
@@ -342,6 +343,7 @@ func (l *Logger) LogHTTPRequest(r *http.Request, statusCode int, duration time.D
 		Duration:   float64(duration.Microseconds()) / 1000.0, // Convert to ms
 		UserAgent:  r.UserAgent(),
 		RemoteAddr: r.RemoteAddr,
+		RequestID:  requestID,
 	}
 	l.Log(entry)
 }

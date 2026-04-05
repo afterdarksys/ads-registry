@@ -287,18 +287,43 @@ func (s *SQLiteStore) PutManifest(ctx context.Context, repo, reference string, m
 }
 
 func (s *SQLiteStore) GetManifest(ctx context.Context, repo, reference string) (mediaType, digest string, payload []byte, err error) {
+	ns, repoName := parseRepoPath(repo)
+
 	err = s.db.QueryRowContext(ctx, `
 		SELECT m.media_type, m.digest, m.payload 
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
 		JOIN namespaces n ON r.namespace_id = n.id
-		WHERE n.name = ? AND r.name = ? AND m.reference = ?`, "library", repo, reference).
+		WHERE n.name = ? AND r.name = ? AND (m.reference = ? OR m.digest = ?)`, ns, repoName, reference, reference).
 		Scan(&mediaType, &digest, &payload)
 
 	if err == sql.ErrNoRows {
 		return "", "", nil, db.ErrNotFound
 	}
 	return mediaType, digest, payload, err
+}
+
+func (s *SQLiteStore) DeleteManifest(ctx context.Context, repo, reference string) error {
+	ns, repoName := parseRepoPath(repo)
+	
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM manifests 
+		WHERE (reference = ? OR digest = ?) AND repo_id IN (
+			SELECT r.id FROM repositories r
+			JOIN namespaces n ON r.namespace_id = n.id
+			WHERE n.name = ? AND r.name = ?
+		)`, reference, reference, ns, repoName)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLiteStore) ListManifests(ctx context.Context) ([]db.ManifestRecord, error) {

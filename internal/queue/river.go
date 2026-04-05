@@ -20,6 +20,26 @@ type Client struct {
 	pool        *pgxpool.Pool
 }
 
+// WebhookNotificationService maps scan reports to dispatcher payloads
+type WebhookNotificationService struct {
+	wd *webhooks.Dispatcher
+}
+
+func (s *WebhookNotificationService) NotifyOwnerOfScanResults(ctx context.Context, digest string, report *ScanReport) error {
+	if len(report.Vulnerabilities) > 0 {
+		s.wd.Dispatch(ctx, "scan.vulnerability_detected", map[string]string{
+			"digest":  digest,
+			"scanner": report.ScannerName,
+		})
+	}
+	return nil
+}
+
+func (s *WebhookNotificationService) SaveScanResultsToDatabase(ctx context.Context, manifestID int, report *ScanReport) error {
+	// Handled directly via db.SaveScanReport inside Job worker
+	return nil
+}
+
 // NewClient creates a new River client from a PostgreSQL connection string
 func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, periodicWorkers int,
 	dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher,
@@ -52,8 +72,10 @@ func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, per
 		return nil, fmt.Errorf("failed to create river client: %w", err)
 	}
 
+	ns := &WebhookNotificationService{wd: wd}
+
 	// Register workers
-	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd, nil) // TODO: Wire up notification service
+	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd, ns)
 	periodicWorker := NewPeriodicRescanWorker(dbStore, riverClient)
 
 	river.AddWorker(workers, scanWorker)

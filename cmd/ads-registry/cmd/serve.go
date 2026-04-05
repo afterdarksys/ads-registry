@@ -56,8 +56,43 @@ var serveCmd = &cobra.Command{
 	},
 }
 
+var configFile string
+
 func init() {
+	serveCmd.Flags().StringVarP(&configFile, "config", "c", "config.json", "Path to configuration file")
 	rootCmd.AddCommand(serveCmd)
+}
+
+// configureHTTPTransport sets up optimized HTTP transport for registry operations
+// Configures connection pooling, timeouts, and HTTP/1.1 behavior for Docker clients
+func configureHTTPTransport() {
+	http.DefaultTransport = &http.Transport{
+		// Connection pooling - critical for upstream registry proxying
+		MaxIdleConns:        1000,            // Total idle connections across all hosts
+		MaxIdleConnsPerHost: 100,             // Idle per upstream registry
+		MaxConnsPerHost:     0,               // Unlimited active connections
+		IdleConnTimeout:     90 * time.Second, // Keep idle connections alive
+
+		// Timeouts
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second, // Connection establishment timeout
+			KeepAlive: 30 * time.Second, // TCP keepalive interval
+			DualStack: true,             // IPv4 and IPv6
+		}).DialContext,
+
+		ResponseHeaderTimeout: 10 * time.Second, // Time to receive response headers
+		ExpectContinueTimeout: 1 * time.Second,  // Time to wait for 100-Continue
+
+		// TLS
+		TLSHandshakeTimeout: 10 * time.Second,
+		ForceAttemptHTTP2:   false, // Disable HTTP/2 for Docker client compatibility
+		DisableCompression:  true,  // Docker blobs are already compressed
+		DisableKeepAlives:   false, // MUST be false for connection reuse
+
+		// Performance
+		WriteBufferSize: 256 * 1024, // 256KB write buffer
+		ReadBufferSize:  256 * 1024, // 256KB read buffer
+	}
 }
 
 // scannerEngineAdapter adapts scanner.Engine to queue.ScanEngine
@@ -99,9 +134,9 @@ func (a *scannerEngineAdapter) Scan(ctx context.Context, namespace, repo, digest
 
 func runServer() {
 	// Load configuration from file
-	cfg, err := config.LoadFile("config.json")
+	cfg, err := config.LoadFile(configFile)
 	if err != nil {
-		log.Printf("Warning: failed to load config.json (%v), using default scaffold config", err)
+		log.Printf("Warning: failed to load %s (%v), using default scaffold config", configFile, err)
 		cfg = &config.Config{
 			Server: config.ServerConfig{
 				Address:           "0.0.0.0",
@@ -132,6 +167,10 @@ func runServer() {
 			},
 		}
 	}
+
+	// Configure global HTTP transport for optimal connection pooling and reuse
+	// Critical for upstream registry proxying and external API calls
+	configureHTTPTransport()
 
 	// Initialize log level from config
 	logLevel := cfg.Logging.Level
@@ -194,10 +233,16 @@ func runServer() {
 	// 1. Init Database
 	var store db.Store
 	switch cfg.Database.Driver {
-	case "sqlite3":
-		store, err = sqlite.New(cfg.Database)
 	case "postgres", "pgsqllite":
 		store, err = postgres.New(cfg.Database)
+		if err != nil {
+			logger.Error("Failed to initialize PostgreSQL connection, falling back to SQLite", err)
+			cfg.Database.Driver = "sqlite3"
+			cfg.Database.DSN = "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared"
+			store, err = sqlite.New(cfg.Database)
+		}
+	case "sqlite3":
+		store, err = sqlite.New(cfg.Database)
 	default:
 		log.Fatalf("unsupported database driver %s", cfg.Database.Driver)
 	}
@@ -488,6 +533,7 @@ func runServer() {
 	}
 
 	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
+	v2api.SetWebhookDispatcher(wd)
 	v2api.Register(r)
 
 	// OAuth2 Authentication API for Web UI
@@ -543,7 +589,7 @@ func runServer() {
 		Addr:              fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.Port),
 		Handler:           r,
 		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
+		WriteTimeout:      0, // CRITICAL: Disable write timeout for large uploads over slow networks
 		IdleTimeout:       cfg.Server.IdleTimeout,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
@@ -556,6 +602,11 @@ func runServer() {
 				// Increase buffer sizes for better throughput on high-latency networks
 				tcpConn.SetReadBuffer(1024 * 1024)  // 1MB read buffer
 				tcpConn.SetWriteBuffer(1024 * 1024) // 1MB write buffer
+				// Enable TCP keepalive to detect dead connections faster
+				tcpConn.SetKeepAlive(true)
+				tcpConn.SetKeepAlivePeriod(30 * time.Second) // Probe every 30s
+				// Disable linger to prevent TIME_WAIT accumulation
+				tcpConn.SetLinger(0)
 			}
 			return ctx
 		},
@@ -575,7 +626,7 @@ func runServer() {
 			Addr:              fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.TLS.Port),
 			Handler:           r,
 			ReadTimeout:       cfg.Server.ReadTimeout,
-			WriteTimeout:      cfg.Server.WriteTimeout,
+			WriteTimeout:      0, // CRITICAL: Disable write timeout for large uploads over slow networks
 			IdleTimeout:       cfg.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,

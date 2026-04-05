@@ -20,6 +20,7 @@ type Store interface {
 	// Manifests
 	PutManifest(ctx context.Context, repo, reference string, mediaType string, digest string, payload []byte) error
 	GetManifest(ctx context.Context, repo, reference string) (mediaType, digest string, payload []byte, err error)
+	DeleteManifest(ctx context.Context, repo, reference string) error
 	ListManifests(ctx context.Context) ([]ManifestRecord, error)
 
 	// Blobs

@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/sync"
 	"github.com/ryan/ads-registry/internal/upstreams"
+	"github.com/ryan/ads-registry/internal/webhooks"
 )
 
 type Router struct {
@@ -36,6 +38,11 @@ type Router struct {
 	upstreamProxy *proxy.UpstreamProxy
 	syncManager   *sync.Manager
 	scanner       *scanner.Service
+	webhook       *webhooks.Dispatcher
+}
+
+func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
+	r.webhook = wd
 }
 
 func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service) *Router {
@@ -106,10 +113,13 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Head("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Put("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Delete("/{org2}/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.deleteManifest)
 			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
 			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
 			repoGroup.Head("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
 			repoGroup.Post("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Post("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads", r.startUpload)
+			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.getUploadProgress)
 			repoGroup.Patch("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
 			repoGroup.Put("/{org2}/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
@@ -118,10 +128,13 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Head("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Put("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Delete("/{org1}/{org}/{namespace}/{repo}/manifests/{reference}", r.deleteManifest)
 			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
 			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
 			repoGroup.Head("/{org1}/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
 			repoGroup.Post("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Post("/{org1}/{org}/{namespace}/{repo}/blobs/uploads", r.startUpload)
+			repoGroup.Get("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.getUploadProgress)
 			repoGroup.Patch("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
 			repoGroup.Put("/{org1}/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
@@ -130,10 +143,13 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Get("/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Head("/{org}/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Put("/{org}/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Delete("/{org}/{namespace}/{repo}/manifests/{reference}", r.deleteManifest)
 			repoGroup.Get("/{org}/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
 			repoGroup.Get("/{org}/{namespace}/{repo}/blobs/{digest}", r.getBlob)
 			repoGroup.Head("/{org}/{namespace}/{repo}/blobs/{digest}", r.headBlob)
 			repoGroup.Post("/{org}/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Post("/{org}/{namespace}/{repo}/blobs/uploads", r.startUpload)
+			repoGroup.Get("/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.getUploadProgress)
 			repoGroup.Patch("/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
 			repoGroup.Put("/{org}/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
@@ -142,10 +158,13 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Get("/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Head("/{namespace}/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Put("/{namespace}/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Delete("/{namespace}/{repo}/manifests/{reference}", r.deleteManifest)
 			repoGroup.Get("/{namespace}/{repo}/referrers/{digest}", r.getReferrers)
 			repoGroup.Get("/{namespace}/{repo}/blobs/{digest}", r.getBlob)
 			repoGroup.Head("/{namespace}/{repo}/blobs/{digest}", r.headBlob)
 			repoGroup.Post("/{namespace}/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Post("/{namespace}/{repo}/blobs/uploads", r.startUpload)
+			repoGroup.Get("/{namespace}/{repo}/blobs/uploads/{uuid}", r.getUploadProgress)
 			repoGroup.Patch("/{namespace}/{repo}/blobs/uploads/{uuid}", r.patchUpload)
 			repoGroup.Put("/{namespace}/{repo}/blobs/uploads/{uuid}", r.putUpload)
 
@@ -154,10 +173,13 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Get("/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Head("/{repo}/manifests/{reference}", r.getManifest)
 			repoGroup.Put("/{repo}/manifests/{reference}", r.putManifest)
+			repoGroup.Delete("/{repo}/manifests/{reference}", r.deleteManifest)
 			repoGroup.Get("/{repo}/referrers/{digest}", r.getReferrers)
 			repoGroup.Get("/{repo}/blobs/{digest}", r.getBlob)
 			repoGroup.Head("/{repo}/blobs/{digest}", r.headBlob)
 			repoGroup.Post("/{repo}/blobs/uploads/", r.startUpload)
+			repoGroup.Post("/{repo}/blobs/uploads", r.startUpload)
+			repoGroup.Get("/{repo}/blobs/uploads/{uuid}", r.getUploadProgress)
 			repoGroup.Patch("/{repo}/blobs/uploads/{uuid}", r.patchUpload)
 			repoGroup.Put("/{repo}/blobs/uploads/{uuid}", r.putUpload)
 		})
@@ -358,13 +380,15 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	// Limit manifest size to 10MB
 	maxManifestSize := int64(10 * 1024 * 1024)
 	if req.ContentLength > maxManifestSize {
+		errMsg := fmt.Sprintf("manifest exceeds maximum size of %d bytes", maxManifestSize)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Registry-Debug-Error", errMsg)
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"errors": []map[string]string{
 				{
 					"code":    "MANIFEST_TOO_LARGE",
-					"message": fmt.Sprintf("manifest exceeds maximum size of %d bytes", maxManifestSize),
+					"message": errMsg,
 				},
 			},
 		})
@@ -480,6 +504,16 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		}()
 	}
 
+	// Async: Webhook Dispatcher
+	if r.webhook != nil {
+		go r.webhook.Dispatch(context.Background(), "push", map[string]string{
+			"namespace":  quotaNs,
+			"repository": fullRepo,
+			"reference":  ref,
+			"digest":     digest,
+		})
+	}
+
 	// Async: Trigger vulnerability scan via DarkScan
 	if r.scanner != nil && r.scanner.IsEnabled() {
 		go func() {
@@ -537,6 +571,23 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 
 	if req.Method == "GET" {
 		path := getPath(fullRepo, digest)
+		// Handle Range header for partial blob downloads
+		if rangeHeader := req.Header.Get("Range"); rangeHeader != "" {
+			// Expected format: bytes=start-
+			var start int64
+			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err == nil && start >= 0 {
+				reader, err := r.storage.Reader(req.Context(), path, start)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				defer reader.Close()
+				w.WriteHeader(http.StatusPartialContent)
+				io.Copy(w, reader)
+				return
+			}
+		}
+		// No Range header – serve full blob
 		reader, err := r.storage.Reader(req.Context(), path, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -558,6 +609,67 @@ func (r *Router) headBlob(w http.ResponseWriter, req *http.Request) {
 func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 	// Extract repository context from direct URL inspection
 	fullRepo, quotaNs := getRepoContext(req)
+
+	// Intercept Cross-Repository Blob Mounts
+	// Format: POST /v2/<name>/blobs/uploads/?mount=<digest>&from=<repository name>
+	mountDigest := req.URL.Query().Get("mount")
+	fromRepo := req.URL.Query().Get("from")
+
+	if mountDigest != "" && fromRepo != "" {
+		log.Printf("[START_UPLOAD] Cross-repo mount requested: fullRepo=%s fromRepo=%s digest=%s", fullRepo, fromRepo, mountDigest)
+		fromPath := getPath(fromRepo, mountDigest)
+		size, err := r.storage.Stat(req.Context(), fromPath)
+
+		// If blob exists in the 'from' repository, we can mount/copy it
+		if err == nil {
+			// 1. Quota check against the target namespace
+			quota, err := r.db.CheckQuota(req.Context(), quotaNs)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if quota != nil && quota.UsedBytes+size > quota.LimitBytes {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"errors": []map[string]string{{"code": "QUOTA_EXCEEDED", "message": "quota exceeded"}},
+				})
+				return
+			}
+
+			// 2. Perform copy
+			reader, err := r.storage.Reader(req.Context(), fromPath, 0)
+			if err == nil {
+				targetPath := getPath(fullRepo, mountDigest)
+				writer, err := r.storage.Writer(req.Context(), targetPath)
+				if err == nil {
+					_, copyErr := io.Copy(writer, reader)
+					writer.Close()
+					reader.Close()
+
+					if copyErr == nil {
+						// 3. Mount successful: Update database and return 201 Created
+						r.db.PutBlob(req.Context(), mountDigest, size, "application/octet-stream")
+						if quota != nil {
+							r.db.UpdateQuotaUsage(req.Context(), quotaNs, size)
+						}
+
+						w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, mountDigest))
+						w.Header().Set("Docker-Content-Digest", mountDigest)
+						w.WriteHeader(http.StatusCreated)
+						return
+					}
+					// Cleanup partial copies if io.Copy fails
+					r.storage.Delete(req.Context(), targetPath)
+				} else {
+					reader.Close()
+				}
+			}
+		} else {
+			log.Printf("[START_UPLOAD] Cross-repo mount failed: blob not found in fromRepo")
+		}
+	}
+
 	uploadUUID := uuid.New().String()
 
 	log.Printf("[START_UPLOAD] fullRepo=%s namespace_context=%s uuid=%s", fullRepo, quotaNs, uploadUUID)
@@ -577,6 +689,37 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// getUploadProgress returns the current upload progress for resumable uploads
+// Implements GET /v2/{name}/blobs/uploads/{uuid}
+// Returns 204 No Content with Range header indicating bytes received
+func (r *Router) getUploadProgress(w http.ResponseWriter, req *http.Request) {
+	fullRepo, _ := getRepoContext(req)
+	uuid := chi.URLParam(req, "uuid")
+
+	tempPath := getPath(fullRepo, "uploads/"+uuid)
+	size, err := r.storage.Stat(req.Context(), tempPath)
+	if err != nil {
+		if err == storage.ErrNotFound {
+			http.Error(w, "upload not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate range end (0-based, so size-1, but if size is 0, report 0-0)
+	rangeEnd := size - 1
+	if rangeEnd < 0 {
+		rangeEnd = 0
+		size = 0
+	}
+
+	w.Header().Set("Range", fmt.Sprintf("0-%d", rangeEnd))
+	w.Header().Set("Docker-Upload-UUID", uuid)
+	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", fullRepo, uuid))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	// Normally appends data to a temp file
 	// Extract repository context from direct URL inspection
@@ -586,13 +729,15 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	// Limit upload size per chunk
 	maxUploadSize := int64(10 * 1024 * 1024 * 1024) // 10GB
 	if req.ContentLength > maxUploadSize {
+		errMsg := fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadSize)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Registry-Debug-Error", errMsg)
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"errors": []map[string]string{
 				{
 					"code":    "UPLOAD_TOO_LARGE",
-					"message": fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadSize),
+					"message": errMsg,
 				},
 			},
 		})
@@ -605,19 +750,37 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer appender.Close()
 
 	// Use limited reader to enforce size limit at read time
 	limitedReader := io.LimitReader(req.Body, maxUploadSize)
 	_, err = io.Copy(appender, limitedReader)
+	
+	// Explicitly close the appender to flush any buffered local writers
+	// before we stat the file size!
+	closeErr := appender.Close()
+	
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if closeErr != nil {
+		http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	size, err := r.storage.Stat(req.Context(), tempPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// We'd ideally track the size properly to return the correct Range
+	rangeEnd := size - 1
+	if rangeEnd < 0 {
+		rangeEnd = 0
+	}
+
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", fullRepo, uuid))
-	w.Header().Set("Range", "0-0") // Assuming 0-0 for MVP as docker clients often ignore it if Location is intact
+	w.Header().Set("Range", fmt.Sprintf("0-%d", rangeEnd))
 	w.Header().Set("Docker-Upload-UUID", uuid)
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -656,13 +819,17 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	var size int64
 	var actualDigest string
 
-	// Check if this is a monolithic upload (temp file doesn't exist yet)
-	// or chunked upload (temp file was created by prior PATCH requests)
+	// Check if this is a monolithic upload (temp file doesn't exist yet or is empty)
+	// or chunked upload (temp file was created and populated by prior PATCH requests)
 	tempFileExists := true
-	if _, err := r.storage.Stat(req.Context(), tempPath); err != nil {
+	if size, err := r.storage.Stat(req.Context(), tempPath); err != nil {
 		if err == storage.ErrNotFound {
 			tempFileExists = false
 		}
+	} else if size == 0 {
+		// startUpload always creates a 0-byte file. If it's still 0 bytes,
+		// no PATCH was performed and we should use the monolithic upload optimization.
+		tempFileExists = false
 	}
 
 	// If there's a body, append it (monolithic upload or final chunk)
@@ -675,9 +842,15 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			_, err = io.Copy(appender, req.Body)
-			appender.Close()
+			
+			// Always check close error, as this flushes the buffer to disk
+			closeErr := appender.Close()
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if closeErr != nil {
+				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
 				return
 			}
 
@@ -707,9 +880,15 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 			hasher := sha256.New()
 			multiWriter := io.MultiWriter(appender, hasher)
 			size, err = io.Copy(multiWriter, req.Body)
-			appender.Close()
+			
+			// Always check close error, as this flushes the buffer to disk
+			closeErr := appender.Close()
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if closeErr != nil {
+				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
 				return
 			}
 			actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
@@ -737,13 +916,15 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	if actualDigest != digest {
 		// Digest mismatch - delete uploaded file and return error
 		r.storage.Delete(req.Context(), tempPath)
+		errMsg := fmt.Sprintf("digest mismatch: expected %s, got %s", digest, actualDigest)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Registry-Debug-Error", errMsg)
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"errors": []map[string]string{
 				{
 					"code":    "DIGEST_INVALID",
-					"message": fmt.Sprintf("digest mismatch: expected %s, got %s", digest, actualDigest),
+					"message": errMsg,
 				},
 			},
 		})
@@ -798,4 +979,43 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, digest))
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (r *Router) deleteManifest(w http.ResponseWriter, req *http.Request) {
+	// Extract repository context from direct URL inspection
+	fullRepo, quotaNs := getRepoContext(req)
+	ref := chi.URLParam(req, "reference")
+
+	// 1. Fetch manifest to find its digest and payload size before deleting
+	_, digest, payload, err := r.db.GetManifest(req.Context(), fullRepo, ref)
+	if err == db.ErrNotFound {
+		http.Error(w, `{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}`, http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Perform deletion from database
+	if err := r.db.DeleteManifest(req.Context(), fullRepo, ref); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 3. Update Quota Usage (Reclaim bytes)
+	// Note: We only delete the manifest record, the underlying blob might optionally be deleted or garbage collected later
+	r.db.UpdateQuotaUsage(req.Context(), quotaNs, -int64(len(payload)))
+
+	// 4. Trigger Webhook Event
+	if r.webhook != nil {
+		go r.webhook.Dispatch(context.Background(), "delete", map[string]string{
+			"namespace":  quotaNs,
+			"repository": fullRepo,
+			"reference":  ref,
+			"digest":     digest,
+		})
+	}
+
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	w.WriteHeader(http.StatusAccepted) // Docker Registry API expects 202 Accepted for delete
 }

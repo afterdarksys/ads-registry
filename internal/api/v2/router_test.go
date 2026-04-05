@@ -29,7 +29,7 @@ func TestRouterPathMatching(t *testing.T) {
 		t.Fatalf("Failed to create token service: %v", err)
 	}
 
-	router := NewRouter(dbStore, storageProvider, tokenService, nil, nil, nil, nil)
+	router := NewRouter(dbStore, storageProvider, tokenService, nil, nil, nil, nil, nil)
 
 	mux := chi.NewRouter()
 	router.Register(mux)
@@ -62,6 +62,20 @@ func TestRouterPathMatching(t *testing.T) {
 			path:          "/v2/nginx/manifests/latest",
 			expectStatus:  http.StatusUnauthorized,
 			expectHandler: "getManifest",
+		},
+		{
+			name:          "Single-level missing trailing slash: POST /v2/tokenworx/blobs/uploads",
+			method:        "POST",
+			path:          "/v2/tokenworx/blobs/uploads",
+			expectStatus:  http.StatusUnauthorized,
+			expectHandler: "startUpload",
+		},
+		{
+			name:          "Single-level delete manifest: DELETE /v2/nginx/manifests/latest",
+			method:        "DELETE",
+			path:          "/v2/nginx/manifests/latest",
+			expectStatus:  http.StatusUnauthorized,
+			expectHandler: "deleteManifest",
 		},
 
 		// Two-level repository paths

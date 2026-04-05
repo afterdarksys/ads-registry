@@ -108,7 +108,20 @@ func (m *Middleware) determineWorkarounds(client *ClientInfo, r *http.Request) [
 			if r.Method == "PUT" && strings.Contains(r.URL.Path, "/manifests/") {
 				workarounds = append(workarounds, "docker_29_manifest_fix")
 			}
-			// Force connection closure on blob operations to prevent reuse issues
+		}
+
+		// Docker 18.x/19.x: Aggressive blob response flushing to prevent "short copy" on manifest
+		// Issue: Docker 18.x doesn't realize blob upload is complete, never attempts manifest PUT
+		// Fix: Force flushes and keep-alive on blob operations to signal completion
+		if client.IsDockerClient() && (client.MatchesVersion("18.*") || client.MatchesVersion("19.*")) {
+			if strings.Contains(r.URL.Path, "/blobs/") {
+				workarounds = append(workarounds, "docker_18_blob_flush")
+			}
+		}
+
+		// Docker 29.x-specific: Force connection closure on blob operations
+		// This workaround is ONLY for 29.x up to 29.2 - causes "short copy" errors on 18.x/19.x and 29.3+
+		if client.IsDockerClient() && (client.MatchesVersion("29.0.*") || client.MatchesVersion("29.1.*") || client.MatchesVersion("29.2.*")) {
 			if strings.Contains(r.URL.Path, "/blobs/") {
 				workarounds = append(workarounds, "docker_29_force_close_blobs")
 			}
@@ -145,6 +158,23 @@ func (m *Middleware) determineWorkarounds(client *ClientInfo, r *http.Request) [
 		workarounds = append(workarounds, "distribution_api_version")
 	}
 
+	// Buildah / Kaniko Large Layer Timeouts (always apply for blob uploads)
+	if strings.Contains(r.URL.Path, "/blobs/uploads/") {
+		workarounds = append(workarounds, "upload_min_chunk_size")
+	}
+
+	// Missing Accept Header fallback (mutate request early)
+	if r.Header.Get("Accept") == "" && strings.Contains(r.URL.Path, "/manifests/") {
+		workarounds = append(workarounds, "missing_accept_header")
+		r.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json")
+	}
+
+	// AWS ECR Client Quirks
+	ua := strings.ToLower(client.UserAgent)
+	if strings.Contains(ua, "aws-cli") || strings.Contains(ua, "ecr-login") || strings.Contains(ua, "amazon") {
+		workarounds = append(workarounds, "aws_ecr_quirks")
+	}
+
 	return workarounds
 }
 
@@ -155,7 +185,7 @@ func (m *Middleware) applyWorkarounds(w http.ResponseWriter, r *http.Request,
 	start := time.Now()
 
 	// Wrap the response writer with workaround capabilities
-	wrappedWriter := m.wrapResponseWriter(w, client, workarounds)
+	wrappedWriter := m.wrapResponseWriter(w, r, client, workarounds)
 
 	// Log workaround activation
 	if m.config.Observability.LogWorkarounds && m.shouldLog() {
@@ -185,7 +215,7 @@ func (m *Middleware) applyWorkarounds(w http.ResponseWriter, r *http.Request,
 }
 
 // wrapResponseWriter wraps http.ResponseWriter with workaround capabilities
-func (m *Middleware) wrapResponseWriter(w http.ResponseWriter, client *ClientInfo,
+func (m *Middleware) wrapResponseWriter(w http.ResponseWriter, r *http.Request, client *ClientInfo,
 	workarounds []string) http.ResponseWriter {
 
 	wrapper := &compatResponseWriter{
@@ -195,6 +225,7 @@ func (m *Middleware) wrapResponseWriter(w http.ResponseWriter, client *ClientInf
 		workarounds:    workarounds,
 		extraFlushes:   m.config.DockerClientWorkarounds.ExtraFlushes,
 		headerDelay:    time.Duration(m.config.DockerClientWorkarounds.HeaderWriteDelay) * time.Millisecond,
+		request:        r,
 	}
 
 	return wrapper
@@ -218,6 +249,7 @@ type compatResponseWriter struct {
 	headerDelay  time.Duration
 	wroteHeader  bool
 	statusCode   int
+	request      *http.Request // Store request for building absolute URLs
 }
 
 // WriteHeader intercepts header writes to apply workarounds
@@ -240,15 +272,37 @@ func (w *compatResponseWriter) WriteHeader(statusCode int) {
 		time.Sleep(w.headerDelay)
 	}
 
-	// Docker 29.x manifest fix: Extra flush after headers
-	if w.hasWorkaround("docker_29_manifest_fix") {
-		if f, ok := w.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
+	// CRITICAL FIX: Always flush after WriteHeader to ensure header-only responses
+	// are sent to the client immediately. This is essential for:
+	// - POST /blobs/uploads/ (startUpload) - returns 202 Accepted with no body
+	// - PATCH /blobs/uploads/{uuid} (patchUpload) - returns 202 Accepted with no body
+	// - HEAD requests - return headers only
+	//
+	// Without this flush, Docker clients hang waiting for the response, causing
+	// "short copy: wrote 1 of 611" errors because they never receive the blob upload
+	// initiation response and therefore never attempt the manifest upload.
+	//
+	// The underlying issue is that Go's http.ResponseWriter buffers headers when
+	// wrapped by middleware, and only flushes automatically when Write() is called.
+	// For header-only responses, Write() is never called, so we must flush explicitly.
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 
-			// Record metric
-			if w.middleware.config.Observability.EnableMetrics {
-				w.middleware.metrics.RecordManifestFix(w.client.Name, "header_flush")
-			}
+		// DEBUG: Log every flush for troubleshooting
+		if w.middleware.config.Observability.LogWorkarounds {
+			log.Printf("[COMPAT] FLUSHED after WriteHeader: status=%d, client=%s",
+				w.statusCode, w.client.String())
+		}
+
+		// Record metric for manifest fix workaround (if active)
+		if w.hasWorkaround("docker_29_manifest_fix") && w.middleware.config.Observability.EnableMetrics {
+			w.middleware.metrics.RecordManifestFix(w.client.Name, "header_flush")
+		}
+	} else {
+		// DEBUG: Log if ResponseWriter is not a Flusher
+		if w.middleware.config.Observability.LogWorkarounds {
+			log.Printf("[COMPAT] WARNING: ResponseWriter is not a Flusher! client=%s",
+				w.client.String())
 		}
 	}
 }
@@ -261,6 +315,22 @@ func (w *compatResponseWriter) Write(b []byte) (int, error) {
 
 	// Write the data
 	n, err := w.ResponseWriter.Write(b)
+
+	// Docker 18.x/19.x blob flush: Aggressive flushing on blob operations
+	// Ensures Docker realizes the blob upload is complete before attempting manifest
+	if w.hasWorkaround("docker_18_blob_flush") {
+		if f, ok := w.ResponseWriter.(http.Flusher); ok {
+			// Force multiple flushes to ensure completion
+			for i := 0; i < 3; i++ {
+				f.Flush()
+			}
+
+			// Record metric
+			if w.middleware.config.Observability.EnableMetrics {
+				w.middleware.metrics.RecordManifestFix(w.client.Name, "blob_flush")
+			}
+		}
+	}
 
 	// Docker 29.x manifest fix: Extra flushes after write
 	if w.hasWorkaround("docker_29_manifest_fix") && w.extraFlushes > 0 {
@@ -329,12 +399,61 @@ func (w *compatResponseWriter) applyHeaderWorkarounds() {
 		header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 	}
 
+	// Location header conversion: Convert relative URLs to absolute
+	// This is critical for Docker clients that expect absolute Location headers
+	if w.middleware.config.HeaderWorkarounds.LocationHeaderFormat == "absolute" {
+		if location := header.Get("Location"); location != "" {
+			// Check if Location is relative (starts with /)
+			if strings.HasPrefix(location, "/") {
+				// Build absolute URL using request Host and scheme
+				scheme := "http"
+				if w.request.TLS != nil {
+					scheme = "https"
+				}
+				// Check X-Forwarded-Proto header (common behind proxies)
+				if proto := w.request.Header.Get("X-Forwarded-Proto"); proto != "" {
+					scheme = proto
+				}
+
+				absoluteLocation := scheme + "://" + w.request.Host + location
+				header.Set("Location", absoluteLocation)
+
+				if w.middleware.config.Observability.EnableMetrics {
+					w.middleware.metrics.RecordHeaderWorkaround("Location", "absolute_url")
+				}
+			}
+		}
+	}
+
+	// Docker 18.x/19.x: Force connection keep-alive for blob operations
+	// Ensures Docker realizes the blob upload is complete and connection is still open for manifest
+	if w.hasWorkaround("docker_18_blob_flush") {
+		header.Set("Connection", "keep-alive")
+
+		if w.middleware.config.Observability.EnableMetrics {
+			w.middleware.metrics.RecordHeaderWorkaround("Connection", "keep_alive")
+		}
+	}
+
 	// Docker 29.x connection closure fix for blob operations
 	if w.hasWorkaround("docker_29_force_close_blobs") {
 		header.Set("Connection", "close")
 
 		if w.middleware.config.Observability.EnableMetrics {
 			w.middleware.metrics.RecordHeaderWorkaround("Connection", "force_close")
+		}
+	}
+
+	// Upload Min Chunk Size
+	if w.hasWorkaround("upload_min_chunk_size") {
+		header.Set("Docker-Upload-Min-Chunk-Size", "5242880") // 5MB
+	}
+
+	// AWS ECR Quirks
+	if w.hasWorkaround("aws_ecr_quirks") {
+		// ECR ping endpoints strictly expect registry/2.0
+		if w.request.URL.Path == "/v2/" || w.request.URL.Path == "/v2" {
+			header.Set("Docker-Distribution-API-Version", "registry/2.0")
 		}
 	}
 }

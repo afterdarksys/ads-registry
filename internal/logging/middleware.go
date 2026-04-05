@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code
@@ -62,6 +64,12 @@ func HTTPLoggingMiddleware(logger *Logger) func(next http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 
+			reqID := r.Header.Get("X-Request-ID")
+			if reqID == "" {
+				reqID = uuid.New().String()
+			}
+			w.Header().Set("X-Request-ID", reqID)
+
 			// Wrap response writer to capture status code
 			rw := &responseWriter{
 				ResponseWriter: w,
@@ -74,7 +82,7 @@ func HTTPLoggingMiddleware(logger *Logger) func(next http.Handler) http.Handler 
 
 			// Log request with full details
 			duration := time.Since(start)
-			logger.LogHTTPRequest(r, rw.statusCode, duration)
+			logger.LogHTTPRequest(r, rw.statusCode, duration, reqID)
 		})
 	}
 }

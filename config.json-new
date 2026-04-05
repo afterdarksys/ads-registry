@@ -134,7 +134,7 @@
             "min_tls_version": "1.2",
             "enable_legacy_ciphers": false,
             "http2_enabled": false,
-            "force_http1_for_clients": ["Docker/29\\..*"],
+            "force_http1_for_clients": ["(?i)docker/v?29\\..*"],
             "alpn_protocols": ["http/1.1"]
         },
         "header_workarounds": {

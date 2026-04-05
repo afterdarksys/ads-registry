@@ -74,12 +74,12 @@ func NewClientDetector() *ClientDetector {
 	patterns := []*clientPattern{
 		// Docker clients
 		{
-			regex:    regexp.MustCompile(`(?i)docker/(\d+)\.(\d+)\.(\d+)`),
+			regex:    regexp.MustCompile(`(?i)docker/v?(\d+)\.(\d+)\.(\d+)`),
 			name:     "docker",
 			protocol: "docker",
 		},
 		{
-			regex:    regexp.MustCompile(`(?i)docker/(\d+)\.(\d+)`),
+			regex:    regexp.MustCompile(`(?i)docker/v?(\d+)\.(\d+)`),
 			name:     "docker",
 			protocol: "docker",
 		},

@@ -308,13 +308,36 @@ func (s *PostgresStore) GetManifest(ctx context.Context, repo, reference string)
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
 		JOIN namespaces n ON r.namespace_id = n.id
-		WHERE n.name = $1 AND r.name = $2 AND m.reference = $3`, ns, repoName, reference).
+		WHERE n.name = $1 AND r.name = $2 AND (m.reference = $3 OR m.digest = $3)`, ns, repoName, reference).
 		Scan(&mediaType, &digest, &payload)
 
 	if err == sql.ErrNoRows {
 		return "", "", nil, db.ErrNotFound
 	}
 	return mediaType, digest, payload, err
+}
+
+func (s *PostgresStore) DeleteManifest(ctx context.Context, repo, reference string) error {
+	ns, repoName := parseRepoPath(repo)
+
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM manifests 
+		WHERE (reference = $1 OR digest = $1) AND repo_id IN (
+			SELECT r.id FROM repositories r
+			JOIN namespaces n ON r.namespace_id = n.id
+			WHERE n.name = $2 AND r.name = $3
+		)`, reference, ns, repoName)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListManifests(ctx context.Context) ([]db.ManifestRecord, error) {

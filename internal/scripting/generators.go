@@ -4,6 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ============================================================================
@@ -251,90 +256,57 @@ func NewComposeConverter() *ComposeConverter {
 
 // ConvertToK8s converts a docker-compose file to Kubernetes manifests
 func (c *ComposeConverter) ConvertToK8s(composePath string, isK3s bool) (string, error) {
-	// TODO: Implement actual docker-compose parsing
-	// This would:
-	// 1. Parse docker-compose.yml
-	// 2. Convert services to Deployments
-	// 3. Convert ports to Services
-	// 4. Convert volumes to PVCs
-	// 5. Convert networks to NetworkPolicies
-	// 6. Handle environment variables → ConfigMaps/Secrets
-	// 7. Handle depends_on → initContainers or order
-	// 8. If k3s: use Traefik Ingress instead of standard Ingress
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read compose file: %w", err)
+	}
 
-	output := `# Generated from docker-compose.yml
-#
-# This is a placeholder implementation.
-# TODO: Parse actual docker-compose file and generate appropriate manifests.
-#
-# Example conversion:
-#
-# docker-compose.yml:
-#   services:
-#     web:
-#       image: nginx:latest
-#       ports:
-#         - "80:80"
-#
-# Converts to:
+	var compose struct {
+		Services map[string]struct {
+			Image string   `yaml:"image"`
+			Ports []string `yaml:"ports"`
+		} `yaml:"services"`
+	}
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: web
-  namespace: default
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: web
-  template:
-    metadata:
-      labels:
-        app: web
-    spec:
-      containers:
-      - name: web
-        image: nginx:latest
-        ports:
-        - containerPort: 80
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		return "", fmt.Errorf("failed to parse compose file: %w", err)
+	}
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: web
-  namespace: default
-spec:
-  type: ClusterIP
-  selector:
-    app: web
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 80
-`
-
-	if isK3s {
-		output += `
----
-# K3s-specific: Traefik IngressRoute instead of standard Ingress
+	var output string
+	for name, svc := range compose.Services {
+		output += c.manifestGen.GenerateDeployment(name, "default", svc.Image, 1) + "---\n"
+		
+		if len(svc.Ports) > 0 {
+			port := int32(80)
+			parts := strings.Split(svc.Ports[0], ":")
+			if len(parts) > 0 {
+				if p, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+					port = int32(p)
+				}
+			}
+			
+			output += c.manifestGen.GenerateService(name, "default", "ClusterIP", port) + "---\n"
+			
+			if isK3s {
+				output += fmt.Sprintf(`# K3s-specific: Traefik IngressRoute
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: web
+  name: %s
   namespace: default
 spec:
   entryPoints:
   - web
   routes:
-  - match: Host(` + "`" + `web.local` + "`" + `)
+  - match: Host(%s%s.local%s)
     kind: Rule
     services:
-    - name: web
-      port: 80
-`
+    - name: %s
+      port: %d
+---
+`, name, "`", name, "`", name, port)
+			}
+		}
 	}
 
 	return output, nil

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 )
 
 // MockStore is a minimal mock implementation for testing
@@ -25,6 +26,10 @@ func (m *MockStore) ListTags(ctx context.Context, repo string, limit int, last s
 
 func (m *MockStore) GetManifest(ctx context.Context, repo, ref string) (mediaType, digest string, payload []byte, err error) {
 	return "", "", nil, ErrNotFound
+}
+
+func (m *MockStore) DeleteManifest(ctx context.Context, repo, ref string) error {
+	return nil
 }
 
 func (m *MockStore) PutManifest(ctx context.Context, repo, ref, mediaType, digest string, payload []byte) error {
@@ -149,6 +154,26 @@ func (m *MockStore) ListReferrers(ctx context.Context, subjectDigest string, art
 
 func (m *MockStore) ListArtifactsByType(ctx context.Context, artifactType string, limit int) ([]ArtifactDescriptor, error) {
 	return []ArtifactDescriptor{}, nil
+}
+
+func (m *MockStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
+	return 0, nil
+}
+
+func (m *MockStore) ListAccessTokens(ctx context.Context, userID int) ([]AccessToken, error) {
+	return []AccessToken{}, nil
+}
+
+func (m *MockStore) GetAccessTokenByHash(ctx context.Context, tokenHash string) (*AccessToken, error) {
+	return nil, ErrNotFound
+}
+
+func (m *MockStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
+	return nil
+}
+
+func (m *MockStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
+	return nil
 }
 
 func (m *MockStore) Close() error {

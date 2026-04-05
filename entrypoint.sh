@@ -1,10 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # Setup data directories with secure permissions
 mkdir -p data/blobs
 chown -R registry:registry data
 chmod -R 750 data
+# Tighten permissions: directories 750, files 660
+find data -type d -exec chmod 750 {} +
+find data -type f -exec chmod 660 {} +
 
 # Check if PostgreSQL is enabled
 if [ "$USE_POSTGRES" = "true" ] || [ "$USE_POSTGRES" = "1" ]; then
@@ -19,7 +22,7 @@ if [ "$USE_POSTGRES" = "true" ] || [ "$USE_POSTGRES" = "1" ]; then
     chown -R postgres:postgres /var/run/postgresql
     
     # Determine postgres binary path dynamically based on installed version on Debian
-    PG_BIN=$(ls -d /usr/lib/postgresql/*/bin | head -n 1)
+    PG_BIN=$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n1)
     
     # Initialize DB if empty
     if [ -z "$(ls -A data/pgdata)" ]; then

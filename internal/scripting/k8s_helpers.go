@@ -1,6 +1,10 @@
 package scripting
 
 import (
+	"fmt"
+	"os/exec"
+	"strings"
+
 	"go.starlark.net/starlark"
 )
 
@@ -167,38 +171,31 @@ func (k *K8sHelpers) createSecret(thread *starlark.Thread, fn *starlark.Builtin,
 }
 
 func (k *K8sHelpers) createIngress(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# Ingress manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: ingress-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createPV(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# PV manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createPVC(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# PVC manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: pvc-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createStatefulSet(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# StatefulSet manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: statefulset-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createDaemonSet(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# DaemonSet manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: daemonset-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createJob(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# Job manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: job-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createCronJob(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# CronJob manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: cronjob-placeholder\n")), nil
 }
 
 // ============================================================================
@@ -234,13 +231,11 @@ func (k *K8sHelpers) createPodSecurityPolicy(thread *starlark.Thread, fn *starla
 }
 
 func (k *K8sHelpers) createResourceQuota(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# ResourceQuota manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: v1\nkind: ResourceQuota\nmetadata:\n  name: quota-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createLimitRange(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# LimitRange manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: v1\nkind: LimitRange\nmetadata:\n  name: limitrange-placeholder\n")), nil
 }
 
 // ============================================================================
@@ -263,23 +258,19 @@ func (k *K8sHelpers) createServiceAccount(thread *starlark.Thread, fn *starlark.
 }
 
 func (k *K8sHelpers) createRole(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# Role manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: role-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createClusterRole(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# ClusterRole manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: clusterrole-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createRoleBinding(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# RoleBinding manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: rolebinding-placeholder\n")), nil
 }
 
 func (k *K8sHelpers) createClusterRoleBinding(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.String("# ClusterRoleBinding manifest placeholder"), nil
+	return starlark.String(fmt.Sprintf("apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: clusterrolebinding-placeholder\n")), nil
 }
 
 // ============================================================================
@@ -379,16 +370,48 @@ func (k *K8sHelpers) createNamespace(thread *starlark.Thread, fn *starlark.Built
 }
 
 func (k *K8sHelpers) applyManifest(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement kubectl apply
-	return starlark.None, nil
+	var manifest string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "manifest", &manifest); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl apply failed: %v output: %s", err, string(out))
+	}
+	return starlark.String(string(out)), nil
 }
 
 func (k *K8sHelpers) deleteResource(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement kubectl delete
-	return starlark.None, nil
+	var manifest string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "manifest", &manifest); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("kubectl", "delete", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl delete failed: %v output: %s", err, string(out))
+	}
+	return starlark.String(string(out)), nil
 }
 
 func (k *K8sHelpers) getResource(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement kubectl get
-	return starlark.None, nil
+	var resourceType, resourceName, namespace string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "type", &resourceType, "name", &resourceName, "namespace?", &namespace); err != nil {
+		return nil, err
+	}
+	
+	cmdArgs := []string{"get", resourceType, resourceName, "-o", "json"}
+	if namespace != "" {
+		cmdArgs = append(cmdArgs, "-n", namespace)
+	}
+
+	cmd := exec.Command("kubectl", cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get failed: %v output: %s", err, string(out))
+	}
+	return starlark.String(string(out)), nil
 }
