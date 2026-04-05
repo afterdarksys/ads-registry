@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/ryan/ads-registry/containertool/pkg/runtime"
@@ -19,7 +20,14 @@ var buildCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		buildContext := args[0]
 		imageTag := args[1]
+		timeout, _ := cmd.Flags().GetInt("timeout")
+
 		ctx := context.Background()
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			defer cancel()
+		}
 
 		mgr, err := runtime.NewManager()
 		if err != nil {
@@ -70,5 +78,6 @@ var buildCmd = &cobra.Command{
 }
 
 func init() {
+	buildCmd.Flags().IntP("timeout", "t", 0, "Timeout in seconds for build operation (0 = no timeout)")
 	rootCmd.AddCommand(buildCmd)
 }

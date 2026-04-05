@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -18,7 +20,14 @@ var runCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		imageName := args[0]
+		timeout, _ := cmd.Flags().GetInt("timeout")
+
 		ctx := context.Background()
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			defer cancel()
+		}
 
 		mgr, err := runtime.NewManager()
 		if err != nil {
@@ -32,8 +41,49 @@ var runCmd = &cobra.Command{
 			return fmt.Errorf("failed to pull image: %w", err)
 		}
 		defer out.Close()
-		if _, err := io.Copy(os.Stdout, out); err != nil {
-			return fmt.Errorf("error reading pull output: %w", err)
+
+		// Parse JSON progress stream
+		decoder := json.NewDecoder(out)
+		layers := make(map[string]string)
+
+		for {
+			var msg struct {
+				Status         string `json:"status"`
+				ID             string `json:"id"`
+				Progress       string `json:"progress"`
+				ProgressDetail struct {
+					Current int64 `json:"current"`
+					Total   int64 `json:"total"`
+				} `json:"progressDetail"`
+			}
+
+			if err := decoder.Decode(&msg); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return fmt.Errorf("error reading pull output: %w", err)
+			}
+
+			// Track layer progress
+			if msg.ID != "" {
+				statusStr := msg.Status
+				if msg.Progress != "" {
+					statusStr += " " + msg.Progress
+				}
+				layers[msg.ID] = statusStr
+
+				// Clear screen and reprint (simple version)
+				if len(layers) <= 10 { // Only show last 10 layers to avoid spam
+					fmt.Printf("\r%-12s: %s", msg.ID, statusStr)
+					if !strings.Contains(msg.Status, "Complete") {
+						fmt.Print("     ")
+					}
+					fmt.Println()
+				}
+			} else if msg.Status != "" {
+				// Non-layer status messages (e.g., "Pulling fs layer")
+				fmt.Println(msg.Status)
+			}
 		}
 
 		fmt.Printf("Creating container from %s...\n", imageName)
@@ -56,5 +106,6 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
+	runCmd.Flags().IntP("timeout", "t", 0, "Timeout in seconds for pull operation (0 = no timeout)")
 	rootCmd.AddCommand(runCmd)
 }
