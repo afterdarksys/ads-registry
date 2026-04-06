@@ -99,16 +99,15 @@ func getAuthToken() string {
 }
 
 func getFormat() string {
-	fmt := viper.GetString("format")
-	if fmt == "" {
-		fmt = format
+	formatVal := viper.GetString("format")
+	if formatVal == "" {
+		formatVal = format
 	}
-	if fmt == "" {
-		fmt := os.Stderr
-		fmt.Fprintln(fmt, "Error: Format not specified. Use --format flag.")
+	if formatVal == "" {
+		fmt.Fprintln(os.Stderr, "Error: Format not specified. Use --format flag.")
 		os.Exit(1)
 	}
-	return fmt
+	return formatVal
 }
 
 func getNamespace() string {

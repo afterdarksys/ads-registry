@@ -51,20 +51,20 @@ func init() {
 func runList(packageName string) {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	if verbose {
-		fmt.Printf("Listing %s packages from %s\n", fmt, regURL)
+		fmt.Printf("Listing %s packages from %s\n", format, regURL)
 	}
 
 	var url string
 	if packageName != "" {
 		// List versions of specific package
-		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, fmt, ns, packageName)
+		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, format, ns, packageName)
 	} else {
 		// List all packages
-		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s?limit=%d", regURL, fmt, ns, listLimit)
+		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s?limit=%d", regURL, format, ns, listLimit)
 	}
 
 	req, err := http.NewRequest("GET", url, nil)

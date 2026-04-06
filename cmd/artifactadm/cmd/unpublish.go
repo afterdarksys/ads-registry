@@ -50,7 +50,7 @@ func init() {
 func runUnpublish(packageName, version string) {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	// Confirmation prompt
@@ -70,9 +70,9 @@ func runUnpublish(packageName, version string) {
 
 	var url string
 	if deleteAllVersions || version == "" {
-		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, fmt, ns, packageName)
+		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, format, ns, packageName)
 	} else {
-		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s/%s", regURL, fmt, ns, packageName, version)
+		url = fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s/%s", regURL, format, ns, packageName, version)
 	}
 
 	req, err := http.NewRequest("DELETE", url, nil)

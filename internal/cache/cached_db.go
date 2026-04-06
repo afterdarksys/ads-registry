@@ -335,6 +335,22 @@ func (s *CachedStore) AttachBlob(ctx context.Context, artifactID int64, blobDige
 	return s.db.AttachBlob(ctx, artifactID, blobDigest, fileName)
 }
 
+func (s *CachedStore) DeleteArtifact(ctx context.Context, format, namespace, packageName, version string) error {
+	return s.db.DeleteArtifact(ctx, format, namespace, packageName, version)
+}
+
+func (s *CachedStore) DeleteAllArtifactVersions(ctx context.Context, format, namespace, packageName string) error {
+	return s.db.DeleteAllArtifactVersions(ctx, format, namespace, packageName)
+}
+
+func (s *CachedStore) GetPackageNames(ctx context.Context, format, namespace string) ([]string, error) {
+	return s.db.GetPackageNames(ctx, format, namespace)
+}
+
+func (s *CachedStore) GetArtifactStatistics(ctx context.Context, format, namespace string) (*db.ArtifactStatistics, error) {
+	return s.db.GetArtifactStatistics(ctx, format, namespace)
+}
+
 func (s *CachedStore) Close() error {
 	return s.db.Close()
 }

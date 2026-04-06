@@ -142,6 +142,33 @@ func (s *PostgresStore) migrate() error {
 		expression TEXT UNIQUE NOT NULL
 	);
 
+	-- Artifact Registry tables for multi-format support
+	CREATE TABLE IF NOT EXISTS universal_artifacts (
+		id SERIAL PRIMARY KEY,
+		format VARCHAR(50) NOT NULL,
+		namespace VARCHAR(255) NOT NULL,
+		package_name VARCHAR(255) NOT NULL,
+		version VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (format, namespace, package_name, version)
+	);
+
+	CREATE TABLE IF NOT EXISTS universal_artifact_blobs (
+		id SERIAL PRIMARY KEY,
+		artifact_id INTEGER NOT NULL REFERENCES universal_artifacts(id) ON DELETE CASCADE,
+		blob_digest VARCHAR(255) NOT NULL,
+		file_name VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(artifact_id, blob_digest)
+	);
+
+	CREATE TABLE IF NOT EXISTS universal_artifact_metadata (
+		id SERIAL PRIMARY KEY,
+		artifact_id INTEGER NOT NULL REFERENCES universal_artifacts(id) ON DELETE CASCADE,
+		raw_data JSONB NOT NULL,
+		UNIQUE(artifact_id)
+	);
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -151,6 +178,8 @@ func (s *PostgresStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_scan_reports_created_at ON scan_reports(created_at);
 	CREATE INDEX IF NOT EXISTS idx_repositories_namespace_id ON repositories(namespace_id);
 	CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
+	CREATE INDEX IF NOT EXISTS idx_universal_artifact_metadata_jsonb ON universal_artifact_metadata USING GIN (raw_data);
+	CREATE INDEX IF NOT EXISTS idx_universal_artifacts_lookup ON universal_artifacts(format, namespace, package_name);
 	`
 	_, err := s.db.Exec(schema)
 	return err

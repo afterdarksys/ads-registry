@@ -63,14 +63,14 @@ func init() {
 func runScan(packageName, version string) {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	if verbose {
 		fmt.Printf("Scanning %s/%s with %s\n", packageName, version, scanEngine)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/scan/%s/%s/%s", regURL, fmt, ns, packageName)
+	url := fmt.Sprintf("%s/api/v1/scan/%s/%s/%s", regURL, format, ns, packageName)
 	if version != "" {
 		url += "/" + version
 	}

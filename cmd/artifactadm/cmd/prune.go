@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -51,16 +50,16 @@ func init() {
 func runPrune() {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	if verbose {
-		fmt.Printf("Pruning %s packages in namespace %s\n", fmt, ns)
+		fmt.Printf("Pruning %s packages in namespace %s\n", format, ns)
 		fmt.Printf("Keep versions: %d, Dry run: %v\n", pruneKeepVersions, pruneDryRun)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/prune/%s/%s?keep=%d&dry_run=%v",
-		regURL, fmt, ns, pruneKeepVersions, pruneDryRun)
+		regURL, format, ns, pruneKeepVersions, pruneDryRun)
 
 	if pruneOlderThan != "" {
 		url += "&older_than=" + pruneOlderThan

@@ -65,11 +65,11 @@ func init() {
 func runPublish() {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	if verbose {
-		fmt.Printf("Publishing %s package to %s\n", fmt, regURL)
+		fmt.Printf("Publishing %s package to %s\n", format, regURL)
 		fmt.Printf("Namespace: %s, File: %s\n", ns, packageFile)
 	}
 
@@ -81,7 +81,7 @@ func runPublish() {
 
 	// Route to format-specific publisher
 	var err error
-	switch fmt {
+	switch format {
 	case "npm":
 		err = publishNPM(regURL, token, ns, packageFile)
 	case "pypi":
@@ -99,7 +99,7 @@ func runPublish() {
 	case "brew", "homebrew":
 		err = publishBrew(regURL, token, ns, packageFile)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: Unsupported format: %s\n", fmt)
+		fmt.Fprintf(os.Stderr, "Error: Unsupported format: %s\n", format)
 		os.Exit(1)
 	}
 

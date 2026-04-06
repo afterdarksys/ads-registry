@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,7 +45,7 @@ func init() {
 func runVerify(packageName, version string) {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
 	if verbose {
@@ -55,7 +53,7 @@ func runVerify(packageName, version string) {
 	}
 
 	// Get package metadata
-	url := fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s/%s", regURL, fmt, ns, packageName, version)
+	url := fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s/%s", regURL, format, ns, packageName, version)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

@@ -565,11 +565,11 @@ func runServer() {
 	// Artifact Management API (for artifactadm CLI)
 	artifactsAPI := artifacts.NewHandler(store)
 	r.Route("/api/v1/artifacts", func(api chi.Router) {
-		api.Use(v2api.Authenticate) // Reuse V2 authentication middleware
+		api.Use(v2api.AuthMiddleware()) // Reuse V2 authentication middleware
 		api.Mount("/", artifactsAPI.Router())
 	})
 	r.Route("/api/v1", func(api chi.Router) {
-		api.Use(v2api.Authenticate)
+		api.Use(v2api.AuthMiddleware())
 		artifactsAPI.RegisterStatsRoute(api)
 	})
 

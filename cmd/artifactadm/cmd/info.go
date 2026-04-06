@@ -50,10 +50,10 @@ func init() {
 func runInfo(packageName, version string) {
 	regURL := getRegistryURL()
 	token := getAuthToken()
-	fmt := getFormat()
+	format := getFormat()
 	ns := getNamespace()
 
-	url := fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, fmt, ns, packageName)
+	url := fmt.Sprintf("%s/api/v1/artifacts/%s/%s/%s", regURL, format, ns, packageName)
 	if version != "" {
 		url += "/" + version
 	}

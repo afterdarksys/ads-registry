@@ -47,6 +47,11 @@ func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
 	r.webhook = wd
 }
 
+// AuthMiddleware returns the authentication middleware handler
+func (r *Router) AuthMiddleware() func(http.Handler) http.Handler {
+	return r.authMid.Protect
+}
+
 func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
