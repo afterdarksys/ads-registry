@@ -1,8 +1,8 @@
 # Build stage
-FROM golang:latest AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install build dependencies for CGO (sqlite3)
-RUN apt-get update && apt-get install -y gcc g++ make libc6-dev
+RUN apk add --no-cache gcc g++ musl-dev sqlite-dev make
 
 WORKDIR /app
 
@@ -13,18 +13,17 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the application
+# Build the application with static linking
 # CGO_ENABLED=1 is required for go-sqlite3
-RUN CGO_ENABLED=1 GOOS=linux go build -o ads-registry ./cmd/ads-registry/
+RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-linkmode external -extldflags -static" -o ads-registry ./cmd/ads-registry/
 
-# Final stage
+# Final stage - use Debian for compatibility with existing setup
 FROM debian:bookworm-slim
 
-# Install runtime dependencies including PostgreSQL, jq, and su-exec
+# Install runtime dependencies including PostgreSQL, jq, and gosu
 RUN apt-get update && \
     apt-get install -y \
     ca-certificates \
-    libc6 \
     postgresql \
     postgresql-contrib \
     jq \
@@ -36,7 +35,7 @@ RUN useradd -r -s /bin/false -U registry
 
 WORKDIR /app
 
-# Copy the binary from the builder stage
+# Copy the statically-linked binary from the builder stage
 COPY --from=builder /app/ads-registry .
 
 # Copy the configuration file and entrypoint script
