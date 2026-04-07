@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ryan/ads-registry/internal/db"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/webhooks"
 )
@@ -44,6 +45,7 @@ type Worker struct {
 	storage  storage.Provider
 	engines  []Engine
 	webhookD *webhooks.Dispatcher
+	broker   *events.Broker
 	jobs     chan ScanJob
 }
 
@@ -54,12 +56,13 @@ type ScanJob struct {
 	Digest    string
 }
 
-func NewWorker(dbStore db.Store, sp storage.Provider, engines []Engine, wd *webhooks.Dispatcher) *Worker {
+func NewWorker(dbStore db.Store, sp storage.Provider, engines []Engine, wd *webhooks.Dispatcher, broker *events.Broker) *Worker {
 	return &Worker{
 		db:       dbStore,
 		storage:  sp,
 		engines:  engines,
 		webhookD: wd,
+		broker:   broker,
 		jobs:     make(chan ScanJob, 100), // Buffer
 	}
 }
@@ -150,6 +153,15 @@ func (w *Worker) runScans(ctx context.Context, job ScanJob) {
 		err = w.db.SaveScanReport(ctx, job.Digest, engine.Name(), data)
 		if err != nil {
 			log.Printf("Failed to save vulnerability report to DB for %s: %v", job.Digest, err)
+			continue
+		}
+		if w.broker != nil {
+			w.broker.Publish("scan.complete", map[string]string{
+				"namespace": job.Namespace,
+				"repo":      job.Repo,
+				"digest":    job.Digest,
+				"scanner":   engine.Name(),
+			})
 		}
 	}
 }

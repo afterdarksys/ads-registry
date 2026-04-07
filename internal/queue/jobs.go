@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/ryan/ads-registry/internal/db"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/webhooks"
 )
@@ -57,6 +58,7 @@ type ScanJobWorker struct {
 	storage         storage.Provider
 	engines         []ScanEngine
 	webhookD        *webhooks.Dispatcher
+	broker          *events.Broker
 	notificationSvc NotificationService
 }
 
@@ -67,12 +69,13 @@ type NotificationService interface {
 }
 
 // NewScanJobWorker creates a new vulnerability scan worker
-func NewScanJobWorker(dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher, notifSvc NotificationService) *ScanJobWorker {
+func NewScanJobWorker(dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher, broker *events.Broker, notifSvc NotificationService) *ScanJobWorker {
 	return &ScanJobWorker{
 		db:              dbStore,
 		storage:         sp,
 		engines:         engines,
 		webhookD:        wd,
+		broker:          broker,
 		notificationSvc: notifSvc,
 	}
 }
@@ -108,6 +111,14 @@ func (w *ScanJobWorker) Work(ctx context.Context, job *river.Job[ScanJobArgs]) e
 		if err != nil {
 			log.Printf("[River] Failed to save vulnerability report to DB for %s: %v", args.Digest, err)
 			return err
+		}
+		if w.broker != nil {
+			w.broker.Publish("scan.complete", map[string]string{
+				"namespace": args.Namespace,
+				"repo":      args.Repo,
+				"digest":    args.Digest,
+				"scanner":   engine.Name(),
+			})
 		}
 
 		// 4. Send notifications to image owner (if notification service is configured)

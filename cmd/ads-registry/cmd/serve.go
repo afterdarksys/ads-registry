@@ -37,6 +37,7 @@ import (
 	"github.com/ryan/ads-registry/internal/logger"
 	"github.com/ryan/ads-registry/internal/logging"
 	"github.com/ryan/ads-registry/internal/policy"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/queue"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/scanner/trivy"
@@ -448,6 +449,7 @@ func runServer() {
 	// Init Security Providers
 	// 1. Scanner engine mapping
 	wd := webhooks.NewDispatcher(cfg.Webhooks)
+	broker := events.NewBroker()
 	engines := []scanner.Engine{
 		trivy.New("/tmp/trivy-cache"),
 		scanner.NewStaticAnalyzer(storageProvider), // Static analysis with Semgrep
@@ -486,6 +488,7 @@ func runServer() {
 			storageProvider,
 			queueEngines,
 			wd,
+			broker,
 			upstreamManager,
 		)
 		if err != nil {
@@ -502,7 +505,7 @@ func runServer() {
 	} else {
 		// Use channel-based scanner for SQLite or when queue is disabled
 		logger.Info("Using channel-based scanner (SQLite mode)")
-		channelWorker := scanner.NewWorker(store, storageProvider, engines, wd)
+		channelWorker := scanner.NewWorker(store, storageProvider, engines, wd, broker)
 		channelWorker.Start(context.Background(), 2)
 	}
 
@@ -556,6 +559,7 @@ func runServer() {
 
 	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService, cfg.Server.DeveloperMode, ldapClient) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
 	v2api.SetWebhookDispatcher(wd)
+	v2api.SetEventBroker(broker)
 	v2api.Register(r)
 
 	// Multi-Format Artifact Registry API (NPM, PyPI, Apt, etc)
@@ -571,6 +575,15 @@ func runServer() {
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(v2api.AuthMiddleware())
 		artifactsAPI.RegisterStatsRoute(api)
+		// SSE scan result stream: GET /api/v1/scans/{digest}/stream
+		api.Get("/scans/{digest}/stream", func(w http.ResponseWriter, req *http.Request) {
+			digest := chi.URLParam(req, "digest")
+			req = req.WithContext(req.Context())
+			q := req.URL.Query()
+			q.Set("digest", digest)
+			req.URL.RawQuery = q.Encode()
+			broker.ServeScanSSE(w, req)
+		})
 	})
 
 	// OAuth2 Authentication API for Web UI

@@ -19,6 +19,7 @@ import (
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/db"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/policy"
 	"github.com/ryan/ads-registry/internal/proxy"
 	"github.com/ryan/ads-registry/internal/scanner"
@@ -39,12 +40,17 @@ type Router struct {
 	syncManager   *sync.Manager
 	scanner       *scanner.Service
 	webhook       *webhooks.Dispatcher
+	broker        *events.Broker
 	developerMode bool
 	ldapClient    *auth.LDAPClient
 }
 
 func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
 	r.webhook = wd
+}
+
+func (r *Router) SetEventBroker(b *events.Broker) {
+	r.broker = b
 }
 
 // AuthMiddleware returns the authentication middleware handler
@@ -95,6 +101,11 @@ func (r *Router) Register(mux chi.Router) {
 		api.Route("/_catalog", func(catalogCtx chi.Router) {
 			catalogCtx.Use(r.authMid.Protect)
 			catalogCtx.Get("/", r.getCatalog)
+		})
+
+		api.Route("/_events", func(eventsCtx chi.Router) {
+			eventsCtx.Use(r.authMid.Protect)
+			eventsCtx.Get("/", r.sseEvents)
 		})
 
 		// CRITICAL FIX: Register routes in REVERSE order (most specific FIRST)
@@ -193,6 +204,14 @@ func (r *Router) Register(mux chi.Router) {
 			repoGroup.Put("/{repo}/blobs/uploads/{uuid}", r.putUpload)
 		})
 	})
+}
+
+func (r *Router) sseEvents(w http.ResponseWriter, req *http.Request) {
+	if r.broker == nil {
+		http.Error(w, "event streaming not available", http.StatusServiceUnavailable)
+		return
+	}
+	r.broker.ServeSSE(w, req)
 }
 
 func (r *Router) baseCheck(w http.ResponseWriter, req *http.Request) {
@@ -520,14 +539,18 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		}()
 	}
 
-	// Async: Webhook Dispatcher
+	// Async: Webhook Dispatcher + SSE broker
+	eventData := map[string]string{
+		"namespace":  quotaNs,
+		"repository": fullRepo,
+		"reference":  ref,
+		"digest":     digest,
+	}
 	if r.webhook != nil {
-		go r.webhook.Dispatch(context.Background(), "push", map[string]string{
-			"namespace":  quotaNs,
-			"repository": fullRepo,
-			"reference":  ref,
-			"digest":     digest,
-		})
+		go r.webhook.Dispatch(context.Background(), "push", eventData)
+	}
+	if r.broker != nil {
+		r.broker.Publish("push", eventData)
 	}
 
 	// Async: Trigger vulnerability scan via DarkScan
@@ -1022,14 +1045,18 @@ func (r *Router) deleteManifest(w http.ResponseWriter, req *http.Request) {
 	// Note: We only delete the manifest record, the underlying blob might optionally be deleted or garbage collected later
 	r.db.UpdateQuotaUsage(req.Context(), quotaNs, -int64(len(payload)))
 
-	// 4. Trigger Webhook Event
+	// 4. Trigger Webhook Event + SSE broker
+	deleteData := map[string]string{
+		"namespace":  quotaNs,
+		"repository": fullRepo,
+		"reference":  ref,
+		"digest":     digest,
+	}
 	if r.webhook != nil {
-		go r.webhook.Dispatch(context.Background(), "delete", map[string]string{
-			"namespace":  quotaNs,
-			"repository": fullRepo,
-			"reference":  ref,
-			"digest":     digest,
-		})
+		go r.webhook.Dispatch(context.Background(), "delete", deleteData)
+	}
+	if r.broker != nil {
+		r.broker.Publish("delete", deleteData)
 	}
 
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")

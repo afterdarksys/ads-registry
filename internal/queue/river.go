@@ -9,6 +9,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/ryan/ads-registry/internal/db"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/storage"
 	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/webhooks"
@@ -42,7 +43,7 @@ func (s *WebhookNotificationService) SaveScanResultsToDatabase(ctx context.Conte
 
 // NewClient creates a new River client from a PostgreSQL connection string
 func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, periodicWorkers int,
-	dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher,
+	dbStore db.Store, sp storage.Provider, engines []ScanEngine, wd *webhooks.Dispatcher, broker *events.Broker,
 	upstreamMgr *upstreams.Manager) (*Client, error) {
 	// Create pgxpool connection
 	pool, err := pgxpool.New(ctx, dsn)
@@ -75,7 +76,7 @@ func NewClient(ctx context.Context, dsn string, defaultWorkers, vulnWorkers, per
 	ns := &WebhookNotificationService{wd: wd}
 
 	// Register workers
-	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd, ns)
+	scanWorker := NewScanJobWorker(dbStore, sp, engines, wd, broker, ns)
 	periodicWorker := NewPeriodicRescanWorker(dbStore, riverClient)
 
 	river.AddWorker(workers, scanWorker)
