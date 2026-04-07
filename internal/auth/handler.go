@@ -136,12 +136,15 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		if !ldapAuthSuccess {
 			dbUser, err = h.db.AuthenticateUser(req.Context(), user, pass)
 		if err != nil {
-			// Bootstrap fallback: Allow admin/admin if no users exist
+			// Bootstrap fallback: Allow admin/admin if no admin user exists yet
 			if user == "admin" && pass == "admin" {
-				// Check if ANY users exist in the database
+				// Check if admin user exists in the database
 				if testUser, _ := h.db.GetUserByUsername(req.Context(), "admin"); testUser == nil {
-					// No admin user exists - allow bootstrap login
-					log.Printf("WARNING: Bootstrap login used (admin/admin). Create a real user ASAP!")
+					// No admin user exists - create one and allow bootstrap login
+					log.Printf("WARNING: Bootstrap login used (admin/admin). Creating admin user — change this password ASAP!")
+					if hashed, hashErr := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost); hashErr == nil {
+						_ = h.db.CreateUser(req.Context(), "admin", string(hashed), []string{"*"})
+					}
 					dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
 				} else {
 					w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
