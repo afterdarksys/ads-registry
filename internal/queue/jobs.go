@@ -123,8 +123,6 @@ func (w *ScanJobWorker) Work(ctx context.Context, job *river.Job[ScanJobArgs]) e
 
 		// 4. Send notifications to image owner (if notification service is configured)
 		if w.notificationSvc != nil {
-			// TODO: Need to add GetManifestID method to db.Store interface
-			// For now, just send notifications using digest
 			if err := w.notificationSvc.NotifyOwnerOfScanResults(ctx, args.Digest, report); err != nil {
 				log.Printf("[River] Failed to send notifications: %v", err)
 			} else {

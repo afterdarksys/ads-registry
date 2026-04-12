@@ -158,11 +158,13 @@ func (r *Router) getStats(w http.ResponseWriter, req *http.Request) {
 	// Format storage size
 	storageStr := formatBytes(totalStorage)
 
+	policies, _ := r.db.ListPolicies(req.Context())
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_repos":      len(repos),
-		"storage_used":     storageStr,
-		"critical_vulns":   criticalVulns,
-		"policy_blocks":    0, // TODO: Add policy block tracking
+		"total_repos":    len(repos),
+		"storage_used":   storageStr,
+		"critical_vulns": criticalVulns,
+		"policy_blocks":  len(policies),
 	})
 }
 

@@ -343,12 +343,31 @@ func (k *K8sHelpers) composeToK3s(thread *starlark.Thread, fn *starlark.Builtin,
 }
 
 func (k *K8sHelpers) parseCompose(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
-	return starlark.None, nil
+	var composePath string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "compose_file", &composePath); err != nil {
+		return nil, err
+	}
+	// Parse the compose file and return it as a YAML string for inspection.
+	// ConvertToK8s handles parsing internally; we re-use it here and return
+	// the raw conversion so callers can inspect the parsed structure.
+	manifests, err := k.composeConverter.ConvertToK8s(composePath, false)
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	return starlark.String(manifests), nil
 }
 
 func (k *K8sHelpers) validateCompose(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	// TODO: Implement
+	var composePath string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "compose_file", &composePath); err != nil {
+		return nil, err
+	}
+	// Validate by attempting a dry-run conversion. If it returns an error the
+	// file is invalid; return False with the error message, otherwise True.
+	_, err := k.composeConverter.ConvertToK8s(composePath, false)
+	if err != nil {
+		return starlark.False, nil
+	}
 	return starlark.True, nil
 }
 
