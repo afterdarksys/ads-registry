@@ -16,13 +16,19 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// stateEntry holds the expiry time and nonce for an in-flight OIDC login.
+type stateEntry struct {
+	expiry time.Time
+	nonce  string
+}
+
 type OIDCHandler struct {
 	config       config.OIDCConfig
 	db           db.Store
 	tokenService *registryAuth.TokenService
 	oauth2Config *oauth2.Config
 	verifier     *oidc.IDTokenVerifier
-	states       map[string]time.Time // state -> expiry time (simple in-memory store)
+	states       map[string]stateEntry // state -> {expiry, nonce}
 }
 
 func NewOIDCHandler(cfg config.OIDCConfig, dbStore db.Store, ts *registryAuth.TokenService) (*OIDCHandler, error) {
@@ -57,7 +63,7 @@ func NewOIDCHandler(cfg config.OIDCConfig, dbStore db.Store, ts *registryAuth.To
 		tokenService: ts,
 		oauth2Config: oauth2Config,
 		verifier:     verifier,
-		states:       make(map[string]time.Time),
+		states:       make(map[string]stateEntry),
 	}, nil
 }
 
@@ -77,14 +83,24 @@ func (h *OIDCHandler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store state with expiry (5 minutes)
-	h.states[state] = time.Now().Add(5 * time.Minute)
+	// Generate nonce for ID token binding
+	nonce, err := generateRandomString(32)
+	if err != nil {
+		http.Error(w, "Failed to generate nonce", http.StatusInternalServerError)
+		return
+	}
+
+	// Store state with expiry (5 minutes) and nonce
+	h.states[state] = stateEntry{
+		expiry: time.Now().Add(5 * time.Minute),
+		nonce:  nonce,
+	}
 
 	// Clean up expired states
 	h.cleanupExpiredStates()
 
-	// Redirect to Authentik
-	authURL := h.oauth2Config.AuthCodeURL(state)
+	// Redirect to provider with nonce included in auth URL
+	authURL := h.oauth2Config.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce))
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -98,11 +114,12 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiry, ok := h.states[state]
-	if !ok || time.Now().After(expiry) {
+	entry, ok := h.states[state]
+	if !ok || time.Now().After(entry.expiry) {
 		http.Error(w, "Invalid or expired state", http.StatusBadRequest)
 		return
 	}
+	storedNonce := entry.nonce
 	delete(h.states, state)
 
 	// Exchange code for token
@@ -134,14 +151,21 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Extract claims
 	var claims struct {
-		Email         string   `json:"email"`
-		EmailVerified bool     `json:"email_verified"`
-		Name          string   `json:"name"`
-		PreferredUsername string `json:"preferred_username"`
-		Groups        []string `json:"groups"`
+		Email             string   `json:"email"`
+		EmailVerified     bool     `json:"email_verified"`
+		Name              string   `json:"name"`
+		PreferredUsername string   `json:"preferred_username"`
+		Groups            []string `json:"groups"`
+		Nonce             string   `json:"nonce"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to parse claims: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Verify nonce to prevent replay attacks
+	if claims.Nonce != storedNonce {
+		http.Error(w, "nonce mismatch", http.StatusBadRequest)
 		return
 	}
 
@@ -219,8 +243,8 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (h *OIDCHandler) cleanupExpiredStates() {
 	now := time.Now()
-	for state, expiry := range h.states {
-		if now.After(expiry) {
+	for state, entry := range h.states {
+		if now.After(entry.expiry) {
 			delete(h.states, state)
 		}
 	}

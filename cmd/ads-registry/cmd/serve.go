@@ -557,7 +557,7 @@ func runServer() {
 		logger.Info("DarkScan vulnerability scanner enabled")
 	}
 
-	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService, cfg.Server.DeveloperMode, ldapClient) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning
+	v2api := v2.NewRouter(store, storageProvider, tokenService, enf, starEng, upstreamManager, syncManager, scannerService, cfg.Server.DeveloperMode, ldapClient, &cfg.VulnGate) // passing enf for policy control, starEng for automation, upstreamManager for proxy, syncManager for peer replication, scannerService for vulnerability scanning, vulnGate for pull blocking
 	v2api.SetWebhookDispatcher(wd)
 	v2api.SetEventBroker(broker)
 	v2api.Register(r)
@@ -603,6 +603,8 @@ func runServer() {
 
 	// Admin Dashboard Management API
 	managementRouter := management.NewRouter(store, tokenService, enf, starEng, cfg.Server.DeveloperMode)
+	managementRouter.WithVulnGate(&cfg.VulnGate)
+	managementRouter.WithConfig(cfg.Auth.LDAP, cfg.Auth.OIDC)
 	managementRouter.Register(r)
 
 	// Multi-Tenancy Management API (PostgreSQL only)

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/ryan/ads-registry/internal/config"
@@ -27,17 +28,27 @@ func (c *LDAPClient) AuthenticateAndFetch(username, password string) ([]string, 
 	var l *ldap.Conn
 	var err error
 
-	if c.config.UseSSL {
-		tlsConfig := &tls.Config{InsecureSkipVerify: c.config.InsecureSkipVerify}
-		l, err = ldap.DialTLS("tcp", c.config.Server, tlsConfig)
-	} else {
-		l, err = ldap.Dial("tcp", c.config.Server)
+	dialLDAP := func() (*ldap.Conn, error) {
+		if c.config.UseSSL {
+			tlsConfig := &tls.Config{InsecureSkipVerify: c.config.InsecureSkipVerify}
+			return ldap.DialTLS("tcp", c.config.Server, tlsConfig)
+		}
+		return ldap.Dial("tcp", c.config.Server)
 	}
 
+	l, err = dialLDAP()
 	if err != nil {
-		return nil, fmt.Errorf("LDAP connection failed: %w", err)
+		// Retry once after a short delay
+		time.Sleep(500 * time.Millisecond)
+		l, err = dialLDAP()
+		if err != nil {
+			return nil, fmt.Errorf("LDAP connection failed: %w", err)
+		}
 	}
 	defer l.Close()
+
+	// Set a connection-level timeout for all operations
+	l.SetTimeout(10 * time.Second)
 
 	// Initial bind with the service account
 	err = l.Bind(c.config.BindDN, c.config.BindPassword)

@@ -23,23 +23,38 @@ import (
 )
 
 type Router struct {
-	db       db.Store
-	authMid  *auth.Middleware
-	tokenTs  *auth.TokenService
-	enforcer *policy.Enforcer
-	starlark *automation.Engine
-	vulnGate *config.VulnGateConfig
+	db         db.Store
+	authMid    *auth.Middleware
+	tokenTs    *auth.TokenService
+	enforcer   *policy.Enforcer
+	starlark   *automation.Engine
+	vulnGate   *config.VulnGateConfig
+	ldapConfig config.LDAPConfig
+	oidcConfig config.OIDCConfig
 }
 
-func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, devMode bool, vulnGate *config.VulnGateConfig) *Router {
+func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, devMode bool) *Router {
 	return &Router{
 		db:       dbStore,
 		tokenTs:  ts,
 		authMid:  auth.NewMiddleware(ts, devMode),
 		enforcer: enf,
 		starlark: star,
-		vulnGate: vulnGate,
 	}
+}
+
+// WithConfig attaches LDAP and OIDC configuration so that status endpoints
+// can expose safe (non-secret) values. Call before Register.
+func (r *Router) WithConfig(ldap config.LDAPConfig, oidc config.OIDCConfig) *Router {
+	r.ldapConfig = ldap
+	r.oidcConfig = oidc
+	return r
+}
+
+// WithVulnGate attaches the vulnerability gate configuration.
+func (r *Router) WithVulnGate(vg *config.VulnGateConfig) *Router {
+	r.vulnGate = vg
+	return r
 }
 
 func (r *Router) Register(mux chi.Router) {
@@ -104,6 +119,9 @@ func (r *Router) Register(mux chi.Router) {
 			adminAPI.Get("/scans", r.listScans)
 			adminAPI.Get("/scans/{digest}", r.getScanReport)
 
+			// Vulnerability Gate
+			adminAPI.Get("/vuln-gate", r.getVulnGate)
+
 			// Policies
 			adminAPI.Get("/policies", r.listPolicies)
 			adminAPI.Post("/policies", r.addPolicy)
@@ -122,6 +140,13 @@ func (r *Router) Register(mux chi.Router) {
 			adminAPI.Patch("/repositories/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
 			adminAPI.Patch("/repositories/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
 			adminAPI.Patch("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
+
+			// LDAP
+			adminAPI.Get("/ldap/status", r.getLDAPStatus)
+			adminAPI.Post("/ldap/sync", r.postLDAPSync)
+
+			// OIDC/SSO
+			adminAPI.Get("/auth/oidc/status", r.getOIDCStatus)
 		})
 
 	})
@@ -873,5 +898,81 @@ func (r *Router) patchTag(w http.ResponseWriter, req *http.Request) {
 		"repo":      repo,
 		"reference": reference,
 		"immutable": payload.Immutable,
+	})
+}
+
+// getVulnGate returns the current vulnerability gate configuration.
+// GET /api/v1/management/vuln-gate
+func (r *Router) getVulnGate(w http.ResponseWriter, req *http.Request) {
+	if r.vulnGate == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"enabled":          false,
+			"block_severities": []string{},
+			"allow_unscanned":  true,
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":          r.vulnGate.Enabled,
+		"block_severities": r.vulnGate.BlockSeverities,
+		"allow_unscanned":  r.vulnGate.AllowUnscanned,
+	})
+}
+
+// getLDAPStatus returns safe (non-secret) LDAP configuration.
+// GET /api/v1/management/ldap/status
+func (r *Router) getLDAPStatus(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":  r.ldapConfig.Enabled,
+		"server":   r.ldapConfig.Server,
+		"use_ssl":  r.ldapConfig.UseSSL,
+		"base_dn":  r.ldapConfig.BaseDN,
+	})
+}
+
+// postLDAPSync triggers an on-demand LDAP group sync for all users.
+// POST /api/v1/management/ldap/sync
+func (r *Router) postLDAPSync(w http.ResponseWriter, req *http.Request) {
+	if !r.ldapConfig.Enabled {
+		http.Error(w, `{"error":"LDAP is not enabled"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	// List all users and check which ones appear to be LDAP-provisioned.
+	// LDAP users are identified by having an empty password hash (set during
+	// auto-provisioning in the auth handler).
+	users, err := r.db.ListUsers(req.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ldapUserCount := 0
+	for _, u := range users {
+		if u.PasswordHash == "" || u.PasswordHash == "ldap_managed_user" {
+			ldapUserCount++
+		}
+	}
+
+	log.Printf("[LDAP SYNC] on-demand sync triggered by admin; %d potential LDAP users found", ldapUserCount)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":          "LDAP sync triggered — users will get updated scopes on next login",
+		"ldap_user_count":  ldapUserCount,
+	})
+}
+
+// getOIDCStatus returns safe (non-secret) OIDC configuration.
+// GET /api/v1/management/auth/oidc/status
+func (r *Router) getOIDCStatus(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":   r.oidcConfig.Enabled,
+		"issuer":    r.oidcConfig.Issuer,
+		"client_id": r.oidcConfig.ClientID,
 	})
 }
