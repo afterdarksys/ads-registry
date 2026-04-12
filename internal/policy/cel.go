@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/cel-go/cel"
@@ -17,11 +18,21 @@ import (
 	"github.com/ryan/ads-registry/internal/scanner"
 )
 
+// resultCacheTTL is how long a policy evaluation result is reused for an
+// identical (method, namespace, repo, reference) tuple.
+const resultCacheTTL = 30 * time.Second
+
+type cachedResult struct {
+	allowed bool
+	expiry  time.Time
+}
+
 type Enforcer struct {
-	env   *cel.Env
-	rules []cel.Program
-	db    db.Store
-	mu    sync.RWMutex
+	env         *cel.Env
+	rules       []cel.Program
+	db          db.Store
+	mu          sync.RWMutex
+	resultCache sync.Map // map[string]cachedResult
 }
 
 func NewEnforcer(store db.Store) (*Enforcer, error) {
@@ -81,6 +92,12 @@ func (e *Enforcer) ReloadPolicies(ctx context.Context) error {
 	e.rules = parsedRules
 	e.mu.Unlock()
 
+	// Invalidate all cached evaluation results since the rule set changed.
+	e.resultCache.Range(func(k, _ interface{}) bool {
+		e.resultCache.Delete(k)
+		return true
+	})
+
 	return nil
 }
 
@@ -104,7 +121,9 @@ func (e *Enforcer) AddRule(ctx context.Context, expression string) error {
 	return e.ReloadPolicies(ctx)
 }
 
-// Protect blocks any OCI Pull/Push if any CEL rule evaluates to false
+// Protect blocks any OCI Pull/Push if any CEL rule evaluates to false.
+// Evaluation results are cached for resultCacheTTL to avoid redundant DB/cache
+// lookups for repeated identical requests.
 func (e *Enforcer) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		repo := chi.URLParam(r, "repo")
@@ -119,22 +138,48 @@ func (e *Enforcer) Protect(next http.Handler) http.Handler {
 			ref = chi.URLParam(r, "uuid")
 		}
 
+		e.mu.RLock()
+		noRules := len(e.rules) == 0
+		e.mu.RUnlock()
+
+		// Fast path: no rules configured — skip all lookups entirely.
+		if noRules {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check result cache before doing any DB/Redis lookups.
+		cacheKey := r.Method + ":" + ns + "/" + repo + ":" + ref
+		if v, ok := e.resultCache.Load(cacheKey); ok {
+			cr := v.(cachedResult)
+			if time.Now().Before(cr.expiry) {
+				if !cr.allowed {
+					http.Error(w, `{"errors":[{"code":"DENIED","message":"transaction blocked by registry security policy"}]}`, http.StatusForbidden)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			e.resultCache.Delete(cacheKey)
+		}
+
 		var signatureValid = false
 		var signatureIssuer = ""
 		var vulnCriticalCount = 0
 		var vulnHighCount = 0
 
 		if r.Method == "GET" || r.Method == "HEAD" {
-			// Resolve the digest to check for a sig tag and vulnerabilities
+			// Resolve the digest to check for a sig tag and vulnerabilities.
+			// Both calls go through CachedStore so they are served from Redis
+			// when available.
 			_, digest, _, err := e.db.GetManifest(r.Context(), filepath.Join(ns, repo), ref)
 			if err == nil {
-				// 1. Signature check
-				// Cosign tag format: sha256-<hex>.sig
+				// 1. Signature check — Cosign tag format: sha256-<hex>.sig
 				sigTag := strings.Replace(digest, ":", "-", 1) + ".sig"
 				_, _, _, sigErr := e.db.GetManifest(r.Context(), filepath.Join(ns, repo), sigTag)
 				if sigErr == nil {
 					signatureValid = true
-					signatureIssuer = "cosign" // basic stub for MVP
+					signatureIssuer = "cosign"
 				}
 
 				// 2. Vulnerability check
@@ -154,7 +199,6 @@ func (e *Enforcer) Protect(next http.Handler) http.Handler {
 			}
 		}
 
-		// Inject dynamic variables into the CEL runtime
 		vars := map[string]interface{}{
 			"request.method":              strings.ToUpper(r.Method),
 			"request.namespace":           ns,
@@ -169,6 +213,7 @@ func (e *Enforcer) Protect(next http.Handler) http.Handler {
 		e.mu.RLock()
 		defer e.mu.RUnlock()
 
+		allowed := true
 		for i, rule := range e.rules {
 			out, _, err := rule.Eval(vars)
 			if err != nil {
@@ -177,9 +222,19 @@ func (e *Enforcer) Protect(next http.Handler) http.Handler {
 				return
 			}
 			if out.Value() == false {
-				http.Error(w, `{"errors":[{"code":"DENIED","message":"transaction blocked by registry security policy"}]}`, http.StatusForbidden)
-				return
+				allowed = false
+				break
 			}
+		}
+
+		e.resultCache.Store(cacheKey, cachedResult{
+			allowed: allowed,
+			expiry:  time.Now().Add(resultCacheTTL),
+		})
+
+		if !allowed {
+			http.Error(w, `{"errors":[{"code":"DENIED","message":"transaction blocked by registry security policy"}]}`, http.StatusForbidden)
+			return
 		}
 
 		next.ServeHTTP(w, r)

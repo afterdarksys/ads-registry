@@ -20,6 +20,23 @@ type Config struct {
 	Compatibility CompatibilityConfig `json:"compatibility"`
 	Peers         []PeerRegistry      `json:"peers"`
 	DarkScan      DarkScanConfig      `json:"darkscan"`
+	VulnGate      VulnGateConfig      `json:"vuln_gate" yaml:"vuln_gate"`
+}
+
+// VulnGateConfig controls vulnerability-based pull gating.
+type VulnGateConfig struct {
+	// Enabled turns on vulnerability pull blocking.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// BlockSeverities lists severity levels that block pulls.
+	// Valid values: "CRITICAL", "HIGH", "MEDIUM", "LOW"
+	// Default: ["CRITICAL"]
+	BlockSeverities []string `json:"block_severities" yaml:"block_severities"`
+
+	// AllowUnscanned allows pulls of images that have no scan report yet.
+	// If false, images without a scan report are blocked.
+	// Default: true (safe default — don't block unscanned images)
+	AllowUnscanned bool `json:"allow_unscanned" yaml:"allow_unscanned"`
 }
 
 type PeerRegistry struct {

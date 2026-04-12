@@ -1,11 +1,9 @@
 package automation
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"time"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
@@ -44,11 +42,16 @@ func (e *Engine) ExecuteEvent(scriptPath string, eventName string, eventData map
 		},
 	)
 
-	// Configure the isolated running thread (no shared memory)
+	// Configure the isolated running thread (no shared memory).
+	// Cancel the thread after execTimeout to prevent runaway scripts.
 	thread := &starlark.Thread{
 		Name:  "registry_automation",
 		Print: func(_ *starlark.Thread, msg string) { log.Printf("[Starlark] %s", msg) },
 	}
+	timer := time.AfterFunc(execTimeout, func() {
+		thread.Cancel("execution timeout exceeded")
+	})
+	defer timer.Stop()
 
 	// Load and compile the target starlark .star file
 	globals, err := starlark.ExecFile(thread, scriptPath, nil, e.builtins)
@@ -93,6 +96,10 @@ func (e *Engine) EvaluateSyncPolicy(scriptPath string, eventData map[string]stri
 		Name:  "registry_sync_policer",
 		Print: func(_ *starlark.Thread, msg string) { log.Printf("[Starlark Sync] %s", msg) },
 	}
+	timer := time.AfterFunc(execTimeout, func() {
+		thread.Cancel("execution timeout exceeded")
+	})
+	defer timer.Stop()
 
 	globals, err := starlark.ExecFile(thread, scriptPath, nil, e.builtins)
 	if err != nil {
@@ -121,37 +128,27 @@ func (e *Engine) EvaluateSyncPolicy(scriptPath string, eventData map[string]stri
 	return true, nil
 }
 
-// httpPostBuiltin provides a native http client to the Starlark runtime
+// httpPostBuiltin provides a sandboxed HTTP POST to the Starlark runtime.
+// Requests to private/loopback IP ranges are blocked to prevent SSRF attacks.
 // usage: http_post("https://api.github.com/...", "{\"json\":\"body\"}")
 func httpPostBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var url string
+	var rawURL string
 	var body string
 
-	// Ensure Starlark user passed correct type of arguments
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "url", &url, "body?", &body); err != nil {
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "url", &rawURL, "body?", &body); err != nil {
 		return nil, err
 	}
 
-	log.Printf("[Starlark Webhook] POST: %s", url)
+	log.Printf("[Starlark Webhook] POST: %s", rawURL)
 
-	req, err := http.NewRequest("POST", url, bytes.NewBufferString(body))
+	status, respBody, err := sandboxedPost(rawURL, body)
 	if err != nil {
-		return nil, fmt.Errorf("http request creation failed: %v", err)
+		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http post failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 
 	// Return a Tuple containing (status_code, response_body)
 	return starlark.Tuple{
-		starlark.MakeInt(resp.StatusCode),
-		starlark.String(string(respBody)),
+		starlark.MakeInt(status),
+		starlark.String(respBody),
 	}, nil
 }
