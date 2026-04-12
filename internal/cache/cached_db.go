@@ -188,6 +188,14 @@ func (s *CachedStore) GetBlobSize(ctx context.Context, digest string) (int64, er
 	return s.db.GetBlobSize(ctx, digest)
 }
 
+func (s *CachedStore) DeleteBlob(ctx context.Context, digest string) error {
+	return s.db.DeleteBlob(ctx, digest)
+}
+
+func (s *CachedStore) ListBlobs(ctx context.Context) ([]db.BlobRecord, error) {
+	return s.db.ListBlobs(ctx)
+}
+
 func (s *CachedStore) GetUserByToken(ctx context.Context, token string) (*db.User, error) {
 	return s.db.GetUserByToken(ctx, token)
 }
@@ -349,6 +357,18 @@ func (s *CachedStore) GetPackageNames(ctx context.Context, format, namespace str
 
 func (s *CachedStore) GetArtifactStatistics(ctx context.Context, format, namespace string) (*db.ArtifactStatistics, error) {
 	return s.db.GetArtifactStatistics(ctx, format, namespace)
+}
+
+func (s *CachedStore) SetTagImmutable(ctx context.Context, repo, reference string, immutable bool) error {
+	return s.db.SetTagImmutable(ctx, repo, reference, immutable)
+}
+
+func (s *CachedStore) IsTagImmutable(ctx context.Context, repo, reference string) (bool, error) {
+	return s.db.IsTagImmutable(ctx, repo, reference)
+}
+
+func (s *CachedStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return s.db.WithTx(ctx, fn)
 }
 
 func (s *CachedStore) Close() error {

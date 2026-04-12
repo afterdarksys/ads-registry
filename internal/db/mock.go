@@ -49,6 +49,14 @@ func (m *MockStore) PutBlob(ctx context.Context, digest string, size int64, medi
 	return nil
 }
 
+func (m *MockStore) DeleteBlob(ctx context.Context, digest string) error {
+	return nil
+}
+
+func (m *MockStore) ListBlobs(ctx context.Context) ([]BlobRecord, error) {
+	return []BlobRecord{}, nil
+}
+
 func (m *MockStore) CheckQuota(ctx context.Context, namespace string) (*Quota, error) {
 	return nil, nil
 }
@@ -211,6 +219,18 @@ func (m *MockStore) StoreArtifactMetadata(ctx context.Context, artifactID int64,
 
 func (m *MockStore) AttachBlob(ctx context.Context, artifactID int64, blobDigest, fileName string) error {
 	return nil
+}
+
+func (m *MockStore) SetTagImmutable(ctx context.Context, repo, reference string, immutable bool) error {
+	return nil
+}
+
+func (m *MockStore) IsTagImmutable(ctx context.Context, repo, reference string) (bool, error) {
+	return false, nil
+}
+
+func (m *MockStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
 }
 
 func (m *MockStore) Close() error {

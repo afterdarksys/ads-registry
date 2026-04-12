@@ -13,8 +13,42 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// sqlQuerier is implemented by both *sql.DB and *sql.Tx, allowing methods to
+// work transparently inside or outside a transaction.
+type sqlQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+type txKey struct{}
+
 type PostgresStore struct {
 	db *sql.DB
+}
+
+// querier returns the active transaction from ctx if one exists, otherwise the
+// underlying *sql.DB.
+func (s *PostgresStore) querier(ctx context.Context) sqlQuerier {
+	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return s.db
+}
+
+// WithTx executes fn inside a database transaction. If fn returns an error the
+// transaction is rolled back; otherwise it is committed.
+func (s *PostgresStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txCtx := context.WithValue(ctx, txKey{}, tx)
+	if err := fn(txCtx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // DB returns the underlying database connection
@@ -190,25 +224,25 @@ func (s *PostgresStore) Close() error {
 }
 
 func (s *PostgresStore) CreateNamespace(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT INTO namespaces (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT INTO namespaces (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
 	return err
 }
 
 func (s *PostgresStore) CreateRepository(ctx context.Context, namespace, name string) error {
 	var nsID int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			if err := s.CreateNamespace(ctx, namespace); err != nil {
 				return err
 			}
-			s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+			s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
 		} else {
 			return err
 		}
 	}
 
-	_, err = s.db.ExecContext(ctx, "INSERT INTO repositories (namespace_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING", nsID, name)
+	_, err = s.querier(ctx).ExecContext(ctx, "INSERT INTO repositories (namespace_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING", nsID, name)
 	return err
 }
 
@@ -236,7 +270,7 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit int, last st
 		args = append(args, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.querier(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +292,7 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit int, last st
 }
 
 func (s *PostgresStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
+	rows, err := s.querier(ctx).QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -276,12 +310,12 @@ func (s *PostgresStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, er
 }
 
 func (s *PostgresStore) AddPolicy(ctx context.Context, expression string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO policies (expression) VALUES ($1) ON CONFLICT(expression) DO NOTHING`, expression)
+	_, err := s.querier(ctx).ExecContext(ctx, `INSERT INTO policies (expression) VALUES ($1) ON CONFLICT(expression) DO NOTHING`, expression)
 	return err
 }
 
 func (s *PostgresStore) DeletePolicy(ctx context.Context, id int) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM policies WHERE id = $1`, id)
+	result, err := s.querier(ctx).ExecContext(ctx, `DELETE FROM policies WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -319,7 +353,7 @@ func (s *PostgresStore) ListTags(ctx context.Context, repo string, limit int, la
 		args = append(args, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.querier(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +383,7 @@ func (s *PostgresStore) PutManifest(ctx context.Context, repo, reference string,
 	}
 
 	var repoID int
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT r.id FROM repositories r
 		JOIN namespaces n ON r.namespace_id = n.id
 		WHERE n.name = $1 AND r.name = $2`, ns, repoName).Scan(&repoID)
@@ -358,7 +392,7 @@ func (s *PostgresStore) PutManifest(ctx context.Context, repo, reference string,
 		return fmt.Errorf("repository not found: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO manifests (repo_id, reference, media_type, digest, payload) 
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT(repo_id, reference) DO UPDATE SET
@@ -374,7 +408,7 @@ func (s *PostgresStore) GetManifest(ctx context.Context, repo, reference string)
 	// Parse namespace/repo path
 	ns, repoName := parseRepoPath(repo)
 
-	err = s.db.QueryRowContext(ctx, `
+	err = s.querier(ctx).QueryRowContext(ctx, `
 		SELECT m.media_type, m.digest, m.payload
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
@@ -391,8 +425,23 @@ func (s *PostgresStore) GetManifest(ctx context.Context, repo, reference string)
 func (s *PostgresStore) DeleteManifest(ctx context.Context, repo, reference string) error {
 	ns, repoName := parseRepoPath(repo)
 
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM manifests 
+	// Check immutability before deleting
+	var immutable bool
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT m.immutable FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = $1 AND r.name = $2 AND (m.reference = $3 OR m.digest = $3)`,
+		ns, repoName, reference).Scan(&immutable)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if immutable {
+		return fmt.Errorf("tag %s is immutable and cannot be deleted", reference)
+	}
+
+	result, err := s.querier(ctx).ExecContext(ctx, `
+		DELETE FROM manifests
 		WHERE (reference = $1 OR digest = $1) AND repo_id IN (
 			SELECT r.id FROM repositories r
 			JOIN namespaces n ON r.namespace_id = n.id
@@ -411,8 +460,59 @@ func (s *PostgresStore) DeleteManifest(ctx context.Context, repo, reference stri
 	return nil
 }
 
+func (s *PostgresStore) SetTagImmutable(ctx context.Context, repo, reference string, immutable bool) error {
+	ns, repoName := parseRepoPath(repo)
+
+	var repoID int
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT r.id FROM repositories r
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = $1 AND r.name = $2`, ns, repoName).Scan(&repoID)
+	if err == sql.ErrNoRows {
+		return db.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	result, err := s.querier(ctx).ExecContext(ctx, `
+		UPDATE manifests SET immutable = $1
+		WHERE repo_id = $2 AND reference = $3`,
+		immutable, repoID, reference)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) IsTagImmutable(ctx context.Context, repo, reference string) (bool, error) {
+	ns, repoName := parseRepoPath(repo)
+
+	var immutable bool
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT m.immutable FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = $1 AND r.name = $2 AND m.reference = $3`,
+		ns, repoName, reference).Scan(&immutable)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return immutable, nil
+}
+
 func (s *PostgresStore) ListManifests(ctx context.Context) ([]db.ManifestRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT n.name, r.name, m.reference, m.digest 
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
@@ -435,13 +535,13 @@ func (s *PostgresStore) ListManifests(ctx context.Context) ([]db.ManifestRecord,
 }
 
 func (s *PostgresStore) PutBlob(ctx context.Context, digest string, size int64, mediaType string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT INTO blobs (digest, size_bytes, media_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", digest, size, mediaType)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT INTO blobs (digest, size_bytes, media_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", digest, size, mediaType)
 	return err
 }
 
 func (s *PostgresStore) BlobExists(ctx context.Context, digest string) (bool, error) {
 	var id int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM blobs WHERE digest = $1", digest).Scan(&id)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM blobs WHERE digest = $1", digest).Scan(&id)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -450,17 +550,39 @@ func (s *PostgresStore) BlobExists(ctx context.Context, digest string) (bool, er
 
 func (s *PostgresStore) GetBlobSize(ctx context.Context, digest string) (int64, error) {
 	var size int64
-	err := s.db.QueryRowContext(ctx, "SELECT size_bytes FROM blobs WHERE digest = $1", digest).Scan(&size)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT size_bytes FROM blobs WHERE digest = $1", digest).Scan(&size)
 	if err == sql.ErrNoRows {
 		return 0, db.ErrNotFound
 	}
 	return size, err
 }
 
+func (s *PostgresStore) DeleteBlob(ctx context.Context, digest string) error {
+	_, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM blobs WHERE digest = $1", digest)
+	return err
+}
+
+func (s *PostgresStore) ListBlobs(ctx context.Context) ([]db.BlobRecord, error) {
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT digest, size_bytes, created_at FROM blobs ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var blobs []db.BlobRecord
+	for rows.Next() {
+		var b db.BlobRecord
+		if err := rows.Scan(&b.Digest, &b.SizeBytes, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		blobs = append(blobs, b)
+	}
+	return blobs, rows.Err()
+}
+
 func (s *PostgresStore) GetUserByToken(ctx context.Context, token string) (*db.User, error) {
 	var u db.User
 	var scopes string
-	err := s.db.QueryRowContext(ctx, "SELECT id, username, scopes FROM users WHERE token_hash = $1", token).Scan(&u.ID, &u.Username, &scopes)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id, username, scopes FROM users WHERE token_hash = $1", token).Scan(&u.ID, &u.Username, &scopes)
 	if err == sql.ErrNoRows {
 		return nil, db.ErrNotFound
 	}
@@ -472,7 +594,7 @@ func (s *PostgresStore) GetUserByToken(ctx context.Context, token string) (*db.U
 }
 
 func (s *PostgresStore) SaveScanReport(ctx context.Context, digest string, scanner string, data []byte) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO scan_reports (digest, scanner, data) 
 		VALUES ($1, $2, $3)
 		ON CONFLICT(digest) DO UPDATE SET
@@ -485,7 +607,7 @@ func (s *PostgresStore) SaveScanReport(ctx context.Context, digest string, scann
 
 func (s *PostgresStore) GetScanReport(ctx context.Context, digest string, scanner string) ([]byte, error) {
 	var data []byte
-	err := s.db.QueryRowContext(ctx, "SELECT data FROM scan_reports WHERE digest = $1 AND scanner = $2", digest, scanner).Scan(&data)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT data FROM scan_reports WHERE digest = $1 AND scanner = $2", digest, scanner).Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, db.ErrNotFound
 	}
@@ -493,7 +615,7 @@ func (s *PostgresStore) GetScanReport(ctx context.Context, digest string, scanne
 }
 
 func (s *PostgresStore) ListScanReports(ctx context.Context) ([]db.ScanReport, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT digest, scanner, data
 		FROM scan_reports
 		ORDER BY created_at DESC
@@ -518,7 +640,7 @@ func (s *PostgresStore) ListScanReports(ctx context.Context) ([]db.ScanReport, e
 func (s *PostgresStore) GetUserByUsername(ctx context.Context, username string) (*db.User, error) {
 	var u db.User
 	var scopes string
-	err := s.db.QueryRowContext(ctx,
+	err := s.querier(ctx).QueryRowContext(ctx,
 		"SELECT id, username, token_hash, scopes FROM users WHERE username = $1",
 		username,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &scopes)
@@ -549,7 +671,7 @@ func (s *PostgresStore) AuthenticateUser(ctx context.Context, username, password
 
 func (s *PostgresStore) CreateUser(ctx context.Context, username, passwordHash string, scopes []string) error {
 	scopesJSON := strings.Join(scopes, ",")
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.querier(ctx).ExecContext(ctx,
 		"INSERT INTO users (username, token_hash, scopes) VALUES ($1, $2, $3)",
 		username, passwordHash, scopesJSON,
 	)
@@ -557,7 +679,7 @@ func (s *PostgresStore) CreateUser(ctx context.Context, username, passwordHash s
 }
 
 func (s *PostgresStore) ListUsers(ctx context.Context) ([]db.User, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +699,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]db.User, error) {
 }
 
 func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM users WHERE username = $1", username)
+	result, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM users WHERE username = $1", username)
 	if err != nil {
 		return err
 	}
@@ -593,7 +715,7 @@ func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
 
 func (s *PostgresStore) UpdateUser(ctx context.Context, username string, scopes []string) error {
 	scopesJSON := strings.Join(scopes, ",")
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.querier(ctx).ExecContext(ctx,
 		"UPDATE users SET scopes = $1 WHERE username = $2",
 		scopesJSON, username,
 	)
@@ -611,7 +733,7 @@ func (s *PostgresStore) UpdateUser(ctx context.Context, username string, scopes 
 }
 
 func (s *PostgresStore) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.querier(ctx).ExecContext(ctx,
 		"UPDATE users SET token_hash = $1 WHERE username = $2",
 		passwordHash, username,
 	)
@@ -638,14 +760,14 @@ func verifyPassword(hash, password string) error {
 // --------------------------------------------------------------------------------
 
 func (s *PostgresStore) CreateGroup(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT INTO groups (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT INTO groups (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
 	return err
 }
 
 func (s *PostgresStore) AddUserToGroup(ctx context.Context, username, groupName string) error {
 	var userID, groupID int
 
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM users WHERE username = $1", username).Scan(&userID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM users WHERE username = $1", username).Scan(&userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return db.ErrNotFound
@@ -653,7 +775,7 @@ func (s *PostgresStore) AddUserToGroup(ctx context.Context, username, groupName 
 		return err
 	}
 
-	err = s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE name = $1", groupName).Scan(&groupID)
+	err = s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM groups WHERE name = $1", groupName).Scan(&groupID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return db.ErrNotFound
@@ -661,12 +783,12 @@ func (s *PostgresStore) AddUserToGroup(ctx context.Context, username, groupName 
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", userID, groupID)
+	_, err = s.querier(ctx).ExecContext(ctx, "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", userID, groupID)
 	return err
 }
 
 func (s *PostgresStore) ListGroups(ctx context.Context) ([]db.Group, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -684,7 +806,7 @@ func (s *PostgresStore) ListGroups(ctx context.Context) ([]db.Group, error) {
 }
 
 func (s *PostgresStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
 		FROM quotas q
 		JOIN namespaces n ON q.namespace_id = n.id
@@ -708,7 +830,7 @@ func (s *PostgresStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
 
 func (s *PostgresStore) CheckQuota(ctx context.Context, namespace string) (*db.Quota, error) {
 	var q db.Quota
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
 		FROM quotas q
 		JOIN namespaces n ON q.namespace_id = n.id
@@ -729,12 +851,12 @@ func (s *PostgresStore) SetQuota(ctx context.Context, namespace string, limitByt
 	}
 
 	var nsID int
-	err = s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+	err = s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO quotas (namespace_id, limit_bytes, used_bytes) 
 		VALUES ($1, $2, 0)
 		ON CONFLICT(namespace_id) DO UPDATE SET limit_bytes=EXCLUDED.limit_bytes
@@ -744,7 +866,7 @@ func (s *PostgresStore) SetQuota(ctx context.Context, namespace string, limitByt
 
 func (s *PostgresStore) UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error {
 	var nsID int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = $1", namespace).Scan(&nsID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// If namespace doesn't exist yet, there's no quota tracked for it
@@ -753,7 +875,7 @@ func (s *PostgresStore) UpdateQuotaUsage(ctx context.Context, namespace string, 
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		UPDATE quotas SET used_bytes = used_bytes + $1 WHERE namespace_id = $2
 	`, sizeDelta, nsID)
 	return err
@@ -765,7 +887,7 @@ func (s *PostgresStore) UpdateQuotaUsage(ctx context.Context, namespace string, 
 
 func (s *PostgresStore) CreateUpstream(ctx context.Context, name, upstreamType, endpoint, region, accessKeyID, secretAccessKey string, enabled, cacheEnabled, pullOnly bool, cacheTTL int) (int, error) {
 	var id int
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		INSERT INTO upstream_registries
 		(name, type, endpoint, region, access_key_id, secret_access_key, enabled, cache_enabled, cache_ttl, pull_only)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -784,7 +906,7 @@ func (s *PostgresStore) GetUpstream(ctx context.Context, id int) (map[string]int
 	var cacheTTL int
 	var createdAt, updatedAt time.Time
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT id, name, type, endpoint, region, access_key_id, secret_access_key,
 		       current_token, token_expiry, last_refresh, refresh_fail_count,
 		       enabled, cache_enabled, cache_ttl, pull_only, created_at, updated_at
@@ -825,7 +947,7 @@ func (s *PostgresStore) GetUpstream(ctx context.Context, id int) (map[string]int
 
 func (s *PostgresStore) GetUpstreamByName(ctx context.Context, name string) (map[string]interface{}, error) {
 	var id int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM upstream_registries WHERE name = $1", name).Scan(&id)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM upstream_registries WHERE name = $1", name).Scan(&id)
 	if err == sql.ErrNoRows {
 		return nil, db.ErrNotFound
 	}
@@ -836,7 +958,7 @@ func (s *PostgresStore) GetUpstreamByName(ctx context.Context, name string) (map
 }
 
 func (s *PostgresStore) ListUpstreams(ctx context.Context) ([]map[string]interface{}, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT id, name, type, endpoint, region, enabled, cache_enabled, pull_only, last_refresh
 		FROM upstream_registries
 		ORDER BY name
@@ -874,7 +996,7 @@ func (s *PostgresStore) ListUpstreams(ctx context.Context) ([]map[string]interfa
 }
 
 func (s *PostgresStore) UpdateUpstreamToken(ctx context.Context, id int, token string, expiry time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		UPDATE upstream_registries
 		SET current_token = $1, token_expiry = $2, last_refresh = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $3
@@ -883,7 +1005,7 @@ func (s *PostgresStore) UpdateUpstreamToken(ctx context.Context, id int, token s
 }
 
 func (s *PostgresStore) DeleteUpstream(ctx context.Context, id int) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM upstream_registries WHERE id = $1", id)
+	_, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM upstream_registries WHERE id = $1", id)
 	return err
 }
 
@@ -893,7 +1015,7 @@ func (s *PostgresStore) DeleteUpstream(ctx context.Context, id int) error {
 
 // SetArtifactMetadata stores metadata for an OCI artifact
 func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.ArtifactMetadata) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO artifact_metadata (digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (digest) DO UPDATE
@@ -902,7 +1024,7 @@ func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.Ar
 
 	// Also update the manifests table for easier querying
 	if err == nil {
-		_, err = s.db.ExecContext(ctx, `
+		_, err = s.querier(ctx).ExecContext(ctx, `
 			UPDATE manifests
 			SET artifact_type = $1, subject_digest = $2
 			WHERE digest = $3
@@ -917,7 +1039,7 @@ func (s *PostgresStore) GetArtifactMetadata(ctx context.Context, digest string) 
 	var metadata db.ArtifactMetadata
 	var chartName, chartVersion, appVersion, metadataJSON, subjectDigest sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json
 		FROM artifact_metadata
 		WHERE digest = $1
@@ -956,7 +1078,7 @@ func (s *PostgresStore) ListReferrers(ctx context.Context, subjectDigest string,
 
 	query += " ORDER BY m.created_at DESC"
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.querier(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -980,7 +1102,7 @@ func (s *PostgresStore) ListArtifactsByType(ctx context.Context, artifactType st
 		limit = 100
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT
 			m.digest,
 			n.name as namespace,
@@ -1063,7 +1185,7 @@ func parseRepoPath(repoPath string) (namespace, repo string) {
 func (s *PostgresStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
 	scopesStr := strings.Join(scopes, ",")
 	var tokenID int
-	err := s.db.QueryRowContext(ctx,
+	err := s.querier(ctx).QueryRowContext(ctx,
 		`INSERT INTO access_tokens (user_id, name, token_hash, scopes, expires_at) 
 		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
 		userID, name, tokenHash, scopesStr, expiresAt,
@@ -1072,7 +1194,7 @@ func (s *PostgresStore) CreateAccessToken(ctx context.Context, userID int, name,
 }
 
 func (s *PostgresStore) ListAccessTokens(ctx context.Context, userID int) ([]db.AccessToken, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.querier(ctx).QueryContext(ctx,
 		`SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at 
 		 FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
 		userID,
@@ -1114,7 +1236,7 @@ func (s *PostgresStore) GetAccessTokenByHash(ctx context.Context, tokenHash stri
 	var lastUsed sql.NullTime
 	var expires sql.NullTime
 
-	err := s.db.QueryRowContext(ctx,
+	err := s.querier(ctx).QueryRowContext(ctx,
 		`SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at 
 		 FROM access_tokens WHERE token_hash = $1`,
 		tokenHash,
@@ -1140,12 +1262,12 @@ func (s *PostgresStore) GetAccessTokenByHash(ctx context.Context, tokenHash stri
 }
 
 func (s *PostgresStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM access_tokens WHERE id = $1", tokenID)
+	_, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM access_tokens WHERE id = $1", tokenID)
 	return err
 }
 
 func (s *PostgresStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.querier(ctx).ExecContext(ctx,
 		"UPDATE access_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1",
 		tokenID,
 	)

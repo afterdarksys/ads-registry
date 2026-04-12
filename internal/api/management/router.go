@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
+	"github.com/ryan/ads-registry/internal/config"
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/policy"
 	"golang.org/x/crypto/bcrypt"
@@ -27,15 +28,17 @@ type Router struct {
 	tokenTs  *auth.TokenService
 	enforcer *policy.Enforcer
 	starlark *automation.Engine
+	vulnGate *config.VulnGateConfig
 }
 
-func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, devMode bool) *Router {
+func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, devMode bool, vulnGate *config.VulnGateConfig) *Router {
 	return &Router{
 		db:       dbStore,
 		tokenTs:  ts,
 		authMid:  auth.NewMiddleware(ts, devMode),
 		enforcer: enf,
 		starlark: star,
+		vulnGate: vulnGate,
 	}
 }
 
@@ -113,6 +116,12 @@ func (r *Router) Register(mux chi.Router) {
 			adminAPI.Delete("/scripts/{name}", r.deleteScript)
 			adminAPI.Post("/scripts/{name}/enable", r.enableScript)
 			adminAPI.Post("/scripts/{name}/disable", r.disableScript)
+
+			// Immutable Tags
+			adminAPI.Patch("/repositories/{namespace}/{repo}/tags/{reference}", r.patchTag)
+			adminAPI.Patch("/repositories/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
+			adminAPI.Patch("/repositories/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
+			adminAPI.Patch("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
 		})
 
 	})
@@ -821,4 +830,48 @@ func (r *Router) deleteAccessToken(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// patchTag handles PATCH /api/v1/management/repositories/{...}/tags/{reference}
+// Body: {"immutable": true} or {"immutable": false}
+func (r *Router) patchTag(w http.ResponseWriter, req *http.Request) {
+	// Extract repo from URL path by stripping prefix and "/tags/{reference}" suffix
+	path := strings.TrimPrefix(req.URL.Path, "/api/v1/management/repositories/")
+	idx := strings.LastIndex(path, "/tags/")
+	if idx < 0 {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	repo := path[:idx]
+	reference := path[idx+len("/tags/"):]
+
+	if repo == "" || reference == "" {
+		http.Error(w, "repo and reference are required", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Immutable bool `json:"immutable"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.db.SetTagImmutable(req.Context(), repo, reference, payload.Immutable); err != nil {
+		if err == db.ErrNotFound {
+			http.Error(w, "tag not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"repo":      repo,
+		"reference": reference,
+		"immutable": payload.Immutable,
+	})
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
+	"github.com/ryan/ads-registry/internal/config"
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/policy"
@@ -45,6 +46,7 @@ type Router struct {
 	broker        *events.Broker
 	developerMode bool
 	ldapClient    *auth.LDAPClient
+	vulnGate      *config.VulnGateConfig
 	// blobGroup deduplicates concurrent finalizations of the same blob digest,
 	// preventing race conditions when multiple clients push identical layers.
 	blobGroup singleflight.Group
@@ -74,7 +76,7 @@ func (r *Router) AuthMiddleware() func(http.Handler) http.Handler {
 	return r.authMid.Protect
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *internalsync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *internalsync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient, vulnGate *config.VulnGateConfig) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
 		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
@@ -92,7 +94,44 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		syncManager:   syncMgr,
 		developerMode: devMode,
 		ldapClient:    ldapClient,
+		vulnGate:      vulnGate,
 	}
+}
+
+// checkVulnGate inspects scan reports for the given digest and returns an error
+// if any vulnerability matches the configured block list.
+func (r *Router) checkVulnGate(ctx context.Context, digest string) error {
+	if r.vulnGate == nil || !r.vulnGate.Enabled {
+		return nil
+	}
+
+	// Try trivy first, then any scanner
+	data, err := r.db.GetScanReport(ctx, digest, "trivy")
+	if err != nil {
+		// No scan report found
+		if r.vulnGate.AllowUnscanned {
+			return nil
+		}
+		return fmt.Errorf("image has not been scanned")
+	}
+
+	// Unmarshal the report
+	var report scanner.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return nil // corrupt report — allow pull
+	}
+
+	blockSet := make(map[string]bool)
+	for _, s := range r.vulnGate.BlockSeverities {
+		blockSet[strings.ToUpper(s)] = true
+	}
+
+	for _, v := range report.Vulnerabilities {
+		if blockSet[strings.ToUpper(v.Severity)] {
+			return fmt.Errorf("image blocked: contains %s vulnerability %s in %s", v.Severity, v.ID, v.Package)
+		}
+	}
+	return nil
 }
 
 func (r *Router) Register(mux chi.Router) {
@@ -413,6 +452,19 @@ func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Vulnerability gate: block pulls of images with blocked severities.
+	if gateErr := r.checkVulnGate(req.Context(), digest); gateErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []map[string]string{{
+				"code":    "DENIED",
+				"message": gateErr.Error(),
+			}},
+		})
+		return
+	}
+
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
@@ -427,6 +479,22 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	ref := chi.URLParam(req, "reference")
 
 	log.Printf("[PUT_MANIFEST] Starting: fullRepo=%s namespace_context=%s ref=%s ContentLength=%d", fullRepo, quotaNs, ref, req.ContentLength)
+
+	// Block overwrites of immutable tags
+	if ref != "" && !strings.HasPrefix(ref, "sha256:") {
+		immutable, err := r.db.IsTagImmutable(req.Context(), fullRepo, ref)
+		if err == nil && immutable {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []map[string]string{{
+					"code":    "TAG_IMMUTABLE",
+					"message": fmt.Sprintf("tag %s is immutable", ref),
+				}},
+			})
+			return
+		}
+	}
 
 	// Limit manifest size to 10MB
 	maxManifestSize := int64(10 * 1024 * 1024)

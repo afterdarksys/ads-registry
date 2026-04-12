@@ -16,8 +16,41 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// sqlQuerier is implemented by both *sql.DB and *sql.Tx.
+type sqlQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+type txKey struct{}
+
 type SQLiteStore struct {
 	db *sql.DB
+}
+
+// querier returns the active transaction from ctx if one exists, otherwise the
+// underlying *sql.DB.
+func (s *SQLiteStore) querier(ctx context.Context) sqlQuerier {
+	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return s.db
+}
+
+// WithTx executes fn inside a database transaction. If fn returns an error the
+// transaction is rolled back; otherwise it is committed.
+func (s *SQLiteStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txCtx := context.WithValue(ctx, txKey{}, tx)
+	if err := fn(txCtx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func New(cfg config.DatabaseConfig) (*SQLiteStore, error) {
@@ -180,26 +213,26 @@ func (s *SQLiteStore) Close() error {
 }
 
 func (s *SQLiteStore) CreateNamespace(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO namespaces (name) VALUES (?)", name)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT OR IGNORE INTO namespaces (name) VALUES (?)", name)
 	return err
 }
 
 func (s *SQLiteStore) CreateRepository(ctx context.Context, namespace, name string) error {
 	var nsID int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Auto create namespace for MVP ease
 			if err := s.CreateNamespace(ctx, namespace); err != nil {
 				return err
 			}
-			s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+			s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
 		} else {
 			return err
 		}
 	}
 
-	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO repositories (namespace_id, name) VALUES (?, ?)", nsID, name)
+	_, err = s.querier(ctx).ExecContext(ctx, "INSERT OR IGNORE INTO repositories (namespace_id, name) VALUES (?, ?)", nsID, name)
 	return err
 }
 
@@ -225,7 +258,7 @@ func (s *SQLiteStore) ListRepositories(ctx context.Context, limit int, last stri
 		args = append(args, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.querier(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +280,7 @@ func (s *SQLiteStore) ListRepositories(ctx context.Context, limit int, last stri
 }
 
 func (s *SQLiteStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
+	rows, err := s.querier(ctx).QueryContext(ctx, `SELECT id, expression FROM policies ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -265,12 +298,12 @@ func (s *SQLiteStore) ListPolicies(ctx context.Context) ([]db.PolicyRecord, erro
 }
 
 func (s *SQLiteStore) AddPolicy(ctx context.Context, expression string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO policies (expression) VALUES (?) ON CONFLICT(expression) DO NOTHING`, expression)
+	_, err := s.querier(ctx).ExecContext(ctx, `INSERT INTO policies (expression) VALUES (?) ON CONFLICT(expression) DO NOTHING`, expression)
 	return err
 }
 
 func (s *SQLiteStore) DeletePolicy(ctx context.Context, id int) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM policies WHERE id = ?`, id)
+	result, err := s.querier(ctx).ExecContext(ctx, `DELETE FROM policies WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -307,7 +340,7 @@ func (s *SQLiteStore) ListTags(ctx context.Context, repo string, limit int, last
 		args = append(args, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.querier(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +371,7 @@ func (s *SQLiteStore) PutManifest(ctx context.Context, repo, reference string, m
 		return fmt.Errorf("failed to create repository: %w", err)
 	}
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT r.id FROM repositories r
 		JOIN namespaces n ON r.namespace_id = n.id
 		WHERE n.name = ? AND r.name = ?`, ns, repoName).Scan(&repoID)
@@ -347,7 +380,7 @@ func (s *SQLiteStore) PutManifest(ctx context.Context, repo, reference string, m
 		return fmt.Errorf("repository not found: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO manifests (repo_id, reference, media_type, digest, payload) 
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(repo_id, reference) DO UPDATE SET
@@ -362,7 +395,7 @@ func (s *SQLiteStore) PutManifest(ctx context.Context, repo, reference string, m
 func (s *SQLiteStore) GetManifest(ctx context.Context, repo, reference string) (mediaType, digest string, payload []byte, err error) {
 	ns, repoName := parseRepoPath(repo)
 
-	err = s.db.QueryRowContext(ctx, `
+	err = s.querier(ctx).QueryRowContext(ctx, `
 		SELECT m.media_type, m.digest, m.payload 
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
@@ -378,9 +411,24 @@ func (s *SQLiteStore) GetManifest(ctx context.Context, repo, reference string) (
 
 func (s *SQLiteStore) DeleteManifest(ctx context.Context, repo, reference string) error {
 	ns, repoName := parseRepoPath(repo)
-	
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM manifests 
+
+	// Check immutability before deleting
+	var immutable bool
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT m.immutable FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = ? AND r.name = ? AND (m.reference = ? OR m.digest = ?)`,
+		ns, repoName, reference, reference).Scan(&immutable)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if immutable {
+		return fmt.Errorf("tag %s is immutable and cannot be deleted", reference)
+	}
+
+	result, err := s.querier(ctx).ExecContext(ctx, `
+		DELETE FROM manifests
 		WHERE (reference = ? OR digest = ?) AND repo_id IN (
 			SELECT r.id FROM repositories r
 			JOIN namespaces n ON r.namespace_id = n.id
@@ -399,8 +447,59 @@ func (s *SQLiteStore) DeleteManifest(ctx context.Context, repo, reference string
 	return nil
 }
 
+func (s *SQLiteStore) SetTagImmutable(ctx context.Context, repo, reference string, immutable bool) error {
+	ns, repoName := parseRepoPath(repo)
+
+	var repoID int
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT r.id FROM repositories r
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = ? AND r.name = ?`, ns, repoName).Scan(&repoID)
+	if err == sql.ErrNoRows {
+		return db.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	result, err := s.querier(ctx).ExecContext(ctx, `
+		UPDATE manifests SET immutable = ?
+		WHERE repo_id = ? AND reference = ?`,
+		immutable, repoID, reference)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return db.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) IsTagImmutable(ctx context.Context, repo, reference string) (bool, error) {
+	ns, repoName := parseRepoPath(repo)
+
+	var immutable bool
+	err := s.querier(ctx).QueryRowContext(ctx, `
+		SELECT m.immutable FROM manifests m
+		JOIN repositories r ON m.repo_id = r.id
+		JOIN namespaces n ON r.namespace_id = n.id
+		WHERE n.name = ? AND r.name = ? AND m.reference = ?`,
+		ns, repoName, reference).Scan(&immutable)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return immutable, nil
+}
+
 func (s *SQLiteStore) ListManifests(ctx context.Context) ([]db.ManifestRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT n.name, r.name, m.reference, m.digest 
 		FROM manifests m
 		JOIN repositories r ON m.repo_id = r.id
@@ -423,13 +522,13 @@ func (s *SQLiteStore) ListManifests(ctx context.Context) ([]db.ManifestRecord, e
 }
 
 func (s *SQLiteStore) PutBlob(ctx context.Context, digest string, size int64, mediaType string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (digest, size_bytes, media_type) VALUES (?, ?, ?)", digest, size, mediaType)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT OR IGNORE INTO blobs (digest, size_bytes, media_type) VALUES (?, ?, ?)", digest, size, mediaType)
 	return err
 }
 
 func (s *SQLiteStore) BlobExists(ctx context.Context, digest string) (bool, error) {
 	var id int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM blobs WHERE digest = ?", digest).Scan(&id)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM blobs WHERE digest = ?", digest).Scan(&id)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -438,11 +537,33 @@ func (s *SQLiteStore) BlobExists(ctx context.Context, digest string) (bool, erro
 
 func (s *SQLiteStore) GetBlobSize(ctx context.Context, digest string) (int64, error) {
 	var size int64
-	err := s.db.QueryRowContext(ctx, "SELECT size_bytes FROM blobs WHERE digest = ?", digest).Scan(&size)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT size_bytes FROM blobs WHERE digest = ?", digest).Scan(&size)
 	if err == sql.ErrNoRows {
 		return 0, db.ErrNotFound
 	}
 	return size, err
+}
+
+func (s *SQLiteStore) DeleteBlob(ctx context.Context, digest string) error {
+	_, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM blobs WHERE digest = ?", digest)
+	return err
+}
+
+func (s *SQLiteStore) ListBlobs(ctx context.Context) ([]db.BlobRecord, error) {
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT digest, size_bytes, created_at FROM blobs ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var blobs []db.BlobRecord
+	for rows.Next() {
+		var b db.BlobRecord
+		if err := rows.Scan(&b.Digest, &b.SizeBytes, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		blobs = append(blobs, b)
+	}
+	return blobs, rows.Err()
 }
 
 func (s *SQLiteStore) GetUserByToken(ctx context.Context, token string) (*db.User, error) {
@@ -450,7 +571,7 @@ func (s *SQLiteStore) GetUserByToken(ctx context.Context, token string) (*db.Use
 	// Kept for backward compatibility
 	var u db.User
 	var scopes string
-	err := s.db.QueryRowContext(ctx, "SELECT id, username, scopes FROM users WHERE token_hash = ?", token).Scan(&u.ID, &u.Username, &scopes)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id, username, scopes FROM users WHERE token_hash = ?", token).Scan(&u.ID, &u.Username, &scopes)
 	if err == sql.ErrNoRows {
 		return nil, db.ErrNotFound
 	}
@@ -464,7 +585,7 @@ func (s *SQLiteStore) GetUserByToken(ctx context.Context, token string) (*db.Use
 func (s *SQLiteStore) GetUserByUsername(ctx context.Context, username string) (*db.User, error) {
 	var u db.User
 	var scopes string
-	err := s.db.QueryRowContext(ctx,
+	err := s.querier(ctx).QueryRowContext(ctx,
 		"SELECT id, username, token_hash, scopes FROM users WHERE username = ?",
 		username,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &scopes)
@@ -480,7 +601,7 @@ func (s *SQLiteStore) GetUserByUsername(ctx context.Context, username string) (*
 }
 
 func (s *SQLiteStore) ListUsers(ctx context.Context) ([]db.User, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT id, username, scopes FROM users ORDER BY username")
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +636,7 @@ func (s *SQLiteStore) AuthenticateUser(ctx context.Context, username, password s
 
 func (s *SQLiteStore) CreateUser(ctx context.Context, username, passwordHash string, scopes []string) error {
 	scopesJSON := strings.Join(scopes, ",")
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.querier(ctx).ExecContext(ctx,
 		"INSERT INTO users (username, token_hash, scopes) VALUES (?, ?, ?)",
 		username, passwordHash, scopesJSON,
 	)
@@ -523,7 +644,7 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, username, passwordHash str
 }
 
 func (s *SQLiteStore) DeleteUser(ctx context.Context, username string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM users WHERE username = ?", username)
+	result, err := s.querier(ctx).ExecContext(ctx, "DELETE FROM users WHERE username = ?", username)
 	if err != nil {
 		return err
 	}
@@ -539,7 +660,7 @@ func (s *SQLiteStore) DeleteUser(ctx context.Context, username string) error {
 
 func (s *SQLiteStore) UpdateUser(ctx context.Context, username string, scopes []string) error {
 	scopesJSON := strings.Join(scopes, ",")
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.querier(ctx).ExecContext(ctx,
 		"UPDATE users SET scopes = ? WHERE username = ?",
 		scopesJSON, username,
 	)
@@ -557,7 +678,7 @@ func (s *SQLiteStore) UpdateUser(ctx context.Context, username string, scopes []
 }
 
 func (s *SQLiteStore) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.querier(ctx).ExecContext(ctx,
 		"UPDATE users SET token_hash = ? WHERE username = ?",
 		passwordHash, username,
 	)
@@ -575,7 +696,7 @@ func (s *SQLiteStore) UpdateUserPassword(ctx context.Context, username, password
 }
 
 func (s *SQLiteStore) SaveScanReport(ctx context.Context, digest string, scanner string, data []byte) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO scan_reports (digest, scanner, data) 
 		VALUES (?, ?, ?)
 		ON CONFLICT(digest) DO UPDATE SET
@@ -588,7 +709,7 @@ func (s *SQLiteStore) SaveScanReport(ctx context.Context, digest string, scanner
 
 func (s *SQLiteStore) GetScanReport(ctx context.Context, digest string, scanner string) ([]byte, error) {
 	var data []byte
-	err := s.db.QueryRowContext(ctx, "SELECT data FROM scan_reports WHERE digest = ? AND scanner = ?", digest, scanner).Scan(&data)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT data FROM scan_reports WHERE digest = ? AND scanner = ?", digest, scanner).Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, db.ErrNotFound
 	}
@@ -596,7 +717,7 @@ func (s *SQLiteStore) GetScanReport(ctx context.Context, digest string, scanner 
 }
 
 func (s *SQLiteStore) ListScanReports(ctx context.Context) ([]db.ScanReport, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT digest, scanner, data
 		FROM scan_reports
 		ORDER BY created_at DESC
@@ -633,12 +754,12 @@ func verifyPassword(hash, password string) error {
 // --------------------------------------------------------------------------------
 
 func (s *SQLiteStore) CreateGroup(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO groups (name) VALUES (?)", name)
+	_, err := s.querier(ctx).ExecContext(ctx, "INSERT OR IGNORE INTO groups (name) VALUES (?)", name)
 	return err
 }
 
 func (s *SQLiteStore) ListGroups(ctx context.Context) ([]db.Group, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
+	rows, err := s.querier(ctx).QueryContext(ctx, "SELECT id, name FROM groups ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +777,7 @@ func (s *SQLiteStore) ListGroups(ctx context.Context) ([]db.Group, error) {
 }
 
 func (s *SQLiteStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
 		FROM quotas q
 		JOIN namespaces n ON q.namespace_id = n.id
@@ -681,7 +802,7 @@ func (s *SQLiteStore) ListQuotas(ctx context.Context) ([]db.Quota, error) {
 func (s *SQLiteStore) AddUserToGroup(ctx context.Context, username, groupName string) error {
 	var userID, groupID int
 
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM users WHERE username = ?", username).Scan(&userID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM users WHERE username = ?", username).Scan(&userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return db.ErrNotFound
@@ -689,7 +810,7 @@ func (s *SQLiteStore) AddUserToGroup(ctx context.Context, username, groupName st
 		return err
 	}
 
-	err = s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE name = ?", groupName).Scan(&groupID)
+	err = s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM groups WHERE name = ?", groupName).Scan(&groupID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return db.ErrNotFound
@@ -697,13 +818,13 @@ func (s *SQLiteStore) AddUserToGroup(ctx context.Context, username, groupName st
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, groupID)
+	_, err = s.querier(ctx).ExecContext(ctx, "INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, groupID)
 	return err
 }
 
 func (s *SQLiteStore) CheckQuota(ctx context.Context, namespace string) (*db.Quota, error) {
 	var q db.Quota
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT q.namespace_id, n.name, q.limit_bytes, q.used_bytes 
 		FROM quotas q
 		JOIN namespaces n ON q.namespace_id = n.id
@@ -724,12 +845,12 @@ func (s *SQLiteStore) SetQuota(ctx context.Context, namespace string, limitBytes
 	}
 
 	var nsID int
-	err = s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+	err = s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO quotas (namespace_id, limit_bytes, used_bytes) 
 		VALUES (?, ?, 0)
 		ON CONFLICT(namespace_id) DO UPDATE SET limit_bytes=excluded.limit_bytes
@@ -739,7 +860,7 @@ func (s *SQLiteStore) SetQuota(ctx context.Context, namespace string, limitBytes
 
 func (s *SQLiteStore) UpdateQuotaUsage(ctx context.Context, namespace string, sizeDelta int64) error {
 	var nsID int
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
+	err := s.querier(ctx).QueryRowContext(ctx, "SELECT id FROM namespaces WHERE name = ?", namespace).Scan(&nsID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// If namespace doesn't exist yet, there's no quota tracked for it
@@ -748,7 +869,7 @@ func (s *SQLiteStore) UpdateQuotaUsage(ctx context.Context, namespace string, si
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.querier(ctx).ExecContext(ctx, `
 		UPDATE quotas SET used_bytes = used_bytes + ? WHERE namespace_id = ?
 	`, sizeDelta, nsID)
 	return err
@@ -803,7 +924,7 @@ func (s *SQLiteStore) ListArtifactsByType(ctx context.Context, artifactType stri
 func (s *SQLiteStore) CreateAccessToken(ctx context.Context, userID int, name, tokenHash string, scopes []string, expiresAt *time.Time) (int, error) {
 	scopesStr := strings.Join(scopes, ",")
 	var tokenID int64
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.querier(ctx).ExecContext(ctx,
 		`INSERT INTO access_tokens (user_id, name, token_hash, scopes, expires_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		userID, name, tokenHash, scopesStr, expiresAt,
@@ -816,7 +937,7 @@ func (s *SQLiteStore) CreateAccessToken(ctx context.Context, userID int, name, t
 }
 
 func (s *SQLiteStore) ListAccessTokens(ctx context.Context, userID int) ([]db.AccessToken, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.querier(ctx).QueryContext(ctx,
 		`SELECT id, user_id, name, token_hash, scopes, created_at, last_used_at, expires_at
 		 FROM access_tokens WHERE user_id = ? ORDER BY created_at DESC`,
 		userID,
@@ -856,7 +977,7 @@ func (s *SQLiteStore) GetAccessTokenByHash(ctx context.Context, tokenHash string
 	var scopesStr string
 	var lastUsed, expires sql.NullTime
 
-	err := s.db.QueryRowContext(ctx,
+	err := s.querier(ctx).QueryRowContext(ctx,
 		`SELECT id, user_id, name, token_hash, scopes, created_at, last_used_at, expires_at
 		 FROM access_tokens WHERE token_hash = ?`,
 		tokenHash,
@@ -883,12 +1004,12 @@ func (s *SQLiteStore) GetAccessTokenByHash(ctx context.Context, tokenHash string
 }
 
 func (s *SQLiteStore) DeleteAccessToken(ctx context.Context, tokenID int) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM access_tokens WHERE id = ?`, tokenID)
+	_, err := s.querier(ctx).ExecContext(ctx, `DELETE FROM access_tokens WHERE id = ?`, tokenID)
 	return err
 }
 
 func (s *SQLiteStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID int) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.querier(ctx).ExecContext(ctx,
 		`UPDATE access_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		tokenID,
 	)
@@ -919,7 +1040,7 @@ func parseRepoPath(repoPath string) (namespace, repo string) {
 // --------------------------------------------------------------------------------
 // CreateArtifact registers a new package version into the generic repository
 func (s *SQLiteStore) CreateArtifact(ctx context.Context, artifact *db.UniversalArtifact) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO universal_artifacts (format, namespace, package_name, version)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT (format, namespace, package_name, version) DO UPDATE SET version = excluded.version
@@ -933,7 +1054,7 @@ func (s *SQLiteStore) CreateArtifact(ctx context.Context, artifact *db.Universal
 	if err != nil {
 		// If ON CONFLICT triggered, get the existing ID
 		var existingID int64
-		err = s.db.QueryRowContext(ctx, `
+		err = s.querier(ctx).QueryRowContext(ctx, `
 			SELECT id FROM universal_artifacts
 			WHERE format = ? AND namespace = ? AND package_name = ? AND version = ?
 		`, artifact.Format, artifact.Namespace, artifact.PackageName, artifact.Version).Scan(&existingID)
@@ -956,7 +1077,7 @@ func (s *SQLiteStore) GetArtifact(ctx context.Context, format, namespace, packag
 	var metadata sql.NullString
 	var createdAt string
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.querier(ctx).QueryRowContext(ctx, `
 		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
 		FROM universal_artifacts a
 		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
@@ -980,7 +1101,7 @@ func (s *SQLiteStore) GetArtifact(ctx context.Context, format, namespace, packag
 	}
 
 	// Fetch blobs
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT blob_digest, file_name, created_at
 		FROM universal_artifact_blobs
 		WHERE artifact_id = ?
@@ -1003,7 +1124,7 @@ func (s *SQLiteStore) GetArtifact(ctx context.Context, format, namespace, packag
 
 // ListArtifacts returns all versions for a package
 func (s *SQLiteStore) ListArtifacts(ctx context.Context, format, namespace, packageName string) ([]*db.UniversalArtifact, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
 		FROM universal_artifacts a
 		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
@@ -1036,7 +1157,7 @@ func (s *SQLiteStore) ListArtifacts(ctx context.Context, format, namespace, pack
 
 // SearchArtifacts allows querying artifacts (basic implementation for SQLite)
 func (s *SQLiteStore) SearchArtifacts(ctx context.Context, format, namespace string, searchQuery json.RawMessage) ([]*db.UniversalArtifact, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT a.id, a.format, a.namespace, a.package_name, a.version, a.created_at, m.raw_data
 		FROM universal_artifacts a
 		LEFT JOIN universal_artifact_metadata m ON a.id = m.artifact_id
@@ -1068,7 +1189,7 @@ func (s *SQLiteStore) SearchArtifacts(ctx context.Context, format, namespace str
 
 // StoreArtifactMetadata saves format-specific JSON metadata
 func (s *SQLiteStore) StoreArtifactMetadata(ctx context.Context, artifactID int64, data json.RawMessage) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO universal_artifact_metadata (artifact_id, raw_data)
 		VALUES (?, ?)
 		ON CONFLICT (artifact_id) DO UPDATE SET raw_data = excluded.raw_data
@@ -1078,7 +1199,7 @@ func (s *SQLiteStore) StoreArtifactMetadata(ctx context.Context, artifactID int6
 
 // AttachBlob links a stored blob to the artifact
 func (s *SQLiteStore) AttachBlob(ctx context.Context, artifactID int64, blobDigest, fileName string) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO universal_artifact_blobs (artifact_id, blob_digest, file_name)
 		VALUES (?, ?, ?)
 		ON CONFLICT (artifact_id, blob_digest) DO NOTHING
@@ -1088,7 +1209,7 @@ func (s *SQLiteStore) AttachBlob(ctx context.Context, artifactID int64, blobDige
 
 // DeleteArtifact removes a specific version of a package
 func (s *SQLiteStore) DeleteArtifact(ctx context.Context, format, namespace, packageName, version string) error {
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.querier(ctx).ExecContext(ctx, `
 		DELETE FROM universal_artifacts
 		WHERE format = ? AND namespace = ? AND package_name = ? AND version = ?
 	`, format, namespace, packageName, version)
@@ -1111,7 +1232,7 @@ func (s *SQLiteStore) DeleteArtifact(ctx context.Context, format, namespace, pac
 
 // DeleteAllArtifactVersions removes all versions of a package
 func (s *SQLiteStore) DeleteAllArtifactVersions(ctx context.Context, format, namespace, packageName string) error {
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.querier(ctx).ExecContext(ctx, `
 		DELETE FROM universal_artifacts
 		WHERE format = ? AND namespace = ? AND package_name = ?
 	`, format, namespace, packageName)
@@ -1134,7 +1255,7 @@ func (s *SQLiteStore) DeleteAllArtifactVersions(ctx context.Context, format, nam
 
 // GetPackageNames returns unique package names for a format and namespace
 func (s *SQLiteStore) GetPackageNames(ctx context.Context, format, namespace string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT DISTINCT package_name
 		FROM universal_artifacts
 		WHERE format = ? AND namespace = ?
@@ -1194,13 +1315,13 @@ func (s *SQLiteStore) GetArtifactStatistics(ctx context.Context, format, namespa
 		`
 	}
 
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&stats.TotalPackages, &stats.TotalVersions)
+	err := s.querier(ctx).QueryRowContext(ctx, query, args...).Scan(&stats.TotalPackages, &stats.TotalVersions)
 	if err != nil {
 		return nil, err
 	}
 
 	// Get format breakdown
-	breakdownRows, err := s.db.QueryContext(ctx, `
+	breakdownRows, err := s.querier(ctx).QueryContext(ctx, `
 		SELECT format, COUNT(*) as count
 		FROM universal_artifacts
 		GROUP BY format

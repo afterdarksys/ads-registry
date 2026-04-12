@@ -23,10 +23,18 @@ type Store interface {
 	DeleteManifest(ctx context.Context, repo, reference string) error
 	ListManifests(ctx context.Context) ([]ManifestRecord, error)
 
+	// SetTagImmutable marks or unmarks a manifest reference as immutable.
+	SetTagImmutable(ctx context.Context, repo, reference string, immutable bool) error
+
+	// IsTagImmutable reports whether a manifest reference is immutable.
+	IsTagImmutable(ctx context.Context, repo, reference string) (bool, error)
+
 	// Blobs
 	PutBlob(ctx context.Context, digest string, size int64, mediaType string) error
 	BlobExists(ctx context.Context, digest string) (bool, error)
 	GetBlobSize(ctx context.Context, digest string) (int64, error)
+	ListBlobs(ctx context.Context) ([]BlobRecord, error)
+	DeleteBlob(ctx context.Context, digest string) error
 
 	// Scanning
 	SaveScanReport(ctx context.Context, digest string, scanner string, data []byte) error
@@ -78,6 +86,11 @@ type Store interface {
 	// Multi-format artifact methods
 	ArtifactStore
 
+	// WithTx executes fn inside a database transaction. The context passed to fn
+	// carries the active transaction so all Store methods called with that
+	// context participate in the same transaction.
+	WithTx(ctx context.Context, fn func(context.Context) error) error
+
 	Close() error
 }
 
@@ -128,6 +141,13 @@ type ManifestRecord struct {
 	Repo      string
 	Reference string
 	Digest    string
+}
+
+// BlobRecord describes a stored blob.
+type BlobRecord struct {
+	Digest    string
+	SizeBytes int64
+	CreatedAt time.Time
 }
 
 // ArtifactMetadata represents OCI artifact metadata
