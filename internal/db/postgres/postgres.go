@@ -1015,12 +1015,16 @@ func (s *PostgresStore) DeleteUpstream(ctx context.Context, id int) error {
 
 // SetArtifactMetadata stores metadata for an OCI artifact
 func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.ArtifactMetadata) error {
+	var metadataJSON interface{}
+	if metadata.MetadataJSON != "" {
+		metadataJSON = metadata.MetadataJSON
+	}
 	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO artifact_metadata (digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (digest) DO UPDATE
 		SET artifact_type = $2, subject_digest = $3, chart_name = $4, chart_version = $5, app_version = $6, metadata_json = $7, updated_at = CURRENT_TIMESTAMP
-	`, metadata.Digest, metadata.ArtifactType, metadata.SubjectDigest, metadata.ChartName, metadata.ChartVersion, metadata.AppVersion, metadata.MetadataJSON)
+	`, metadata.Digest, metadata.ArtifactType, metadata.SubjectDigest, metadata.ChartName, metadata.ChartVersion, metadata.AppVersion, metadataJSON)
 
 	// Also update the manifests table for easier querying
 	if err == nil {
