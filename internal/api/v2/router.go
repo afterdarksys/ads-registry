@@ -849,6 +849,8 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	fullRepo, _ := getRepoContext(req)
 	uuid := chi.URLParam(req, "uuid")
 
+	log.Printf("[PATCH_UPLOAD] Start: fullRepo=%s uuid=%s ContentLength=%d", fullRepo, uuid, req.ContentLength)
+
 	// Serialize concurrent PATCH requests for the same UUID to prevent
 	// data corruption from simultaneous appends to the same temp file.
 	unlock := r.lockUpload(uuid)
@@ -858,6 +860,7 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	maxUploadSize := int64(10 * 1024 * 1024 * 1024) // 10GB
 	if req.ContentLength > maxUploadSize {
 		errMsg := fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadSize)
+		log.Printf("[PATCH_UPLOAD] ERROR too large: fullRepo=%s uuid=%s", fullRepo, uuid)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Registry-Debug-Error", errMsg)
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
@@ -875,29 +878,33 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	tempPath := getPath(fullRepo, "uploads/"+uuid)
 	appender, err := r.storage.Appender(req.Context(), tempPath)
 	if err != nil {
+		log.Printf("[PATCH_UPLOAD] ERROR appender open: fullRepo=%s uuid=%s err=%v", fullRepo, uuid, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Use limited reader to enforce size limit at read time
 	limitedReader := io.LimitReader(req.Body, maxUploadSize)
-	_, err = io.Copy(appender, limitedReader)
-	
+	n, err := io.Copy(appender, limitedReader)
+
 	// Explicitly close the appender to flush any buffered local writers
 	// before we stat the file size!
 	closeErr := appender.Close()
-	
+
 	if err != nil {
+		log.Printf("[PATCH_UPLOAD] ERROR copy: fullRepo=%s uuid=%s written=%d err=%v", fullRepo, uuid, n, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if closeErr != nil {
+		log.Printf("[PATCH_UPLOAD] ERROR close: fullRepo=%s uuid=%s written=%d err=%v", fullRepo, uuid, n, closeErr)
 		http.Error(w, closeErr.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	size, err := r.storage.Stat(req.Context(), tempPath)
 	if err != nil {
+		log.Printf("[PATCH_UPLOAD] ERROR stat: fullRepo=%s uuid=%s err=%v", fullRepo, uuid, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -907,6 +914,7 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 		rangeEnd = 0
 	}
 
+	log.Printf("[PATCH_UPLOAD] Success: fullRepo=%s uuid=%s written=%d totalSize=%d", fullRepo, uuid, n, size)
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", fullRepo, uuid))
 	w.Header().Set("Range", fmt.Sprintf("0-%d", rangeEnd))
 	w.Header().Set("Docker-Upload-UUID", uuid)
