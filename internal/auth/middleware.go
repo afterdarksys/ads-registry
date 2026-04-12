@@ -151,12 +151,10 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 			authorized = true
 		}
 
-		// TEMPORARY: Disable authorization check for migration
-		// TODO: Fix repository path parsing bug (lines 54-56)
-		// if !authorized {
-		// 	http.Error(w, `{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`, http.StatusForbidden)
-		// 	return
-		// }
+		if !authorized {
+			http.Error(w, `{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`, http.StatusForbidden)
+			return
+		}
 
 		// Set context and continue
 		ctx := context.WithValue(r.Context(), UserContext, *claims)

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -24,9 +25,10 @@ import (
 	"github.com/ryan/ads-registry/internal/proxy"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/storage"
-	"github.com/ryan/ads-registry/internal/sync"
+	internalsync "github.com/ryan/ads-registry/internal/sync"
 	"github.com/ryan/ads-registry/internal/upstreams"
 	"github.com/ryan/ads-registry/internal/webhooks"
+	"golang.org/x/sync/singleflight"
 )
 
 type Router struct {
@@ -37,12 +39,26 @@ type Router struct {
 	enforcer      *policy.Enforcer
 	starlark      *automation.Engine
 	upstreamProxy *proxy.UpstreamProxy
-	syncManager   *sync.Manager
+	syncManager   *internalsync.Manager
 	scanner       *scanner.Service
 	webhook       *webhooks.Dispatcher
 	broker        *events.Broker
 	developerMode bool
 	ldapClient    *auth.LDAPClient
+	// blobGroup deduplicates concurrent finalizations of the same blob digest,
+	// preventing race conditions when multiple clients push identical layers.
+	blobGroup singleflight.Group
+	// uploadMu serializes concurrent PATCH requests for the same upload UUID,
+	// preventing data corruption when two clients append to the same temp file.
+	uploadMu sync.Map
+}
+
+// lockUpload acquires a per-upload mutex for the given UUID and returns an
+// unlock function. Callers must defer the returned function.
+func (r *Router) lockUpload(uuid string) func() {
+	mu, _ := r.uploadMu.LoadOrStore(uuid, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	return func() { mu.(*sync.Mutex).Unlock() }
 }
 
 func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
@@ -58,7 +74,7 @@ func (r *Router) AuthMiddleware() func(http.Handler) http.Handler {
 	return r.authMid.Protect
 }
 
-func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *sync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient) *Router {
+func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.TokenService, enf *policy.Enforcer, star *automation.Engine, upstreamMgr *upstreams.Manager, syncMgr *internalsync.Manager, scannerSvc *scanner.Service, devMode bool, ldapClient *auth.LDAPClient) *Router {
 	var upstreamProxy *proxy.UpstreamProxy
 	if upstreamMgr != nil {
 		upstreamProxy = proxy.NewUpstreamProxy(upstreamMgr)
@@ -489,26 +505,26 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Store the canonical form
-	err = r.db.PutManifest(req.Context(), fullRepo, ref, mediaType, digest, canonical)
+	// Store the manifest, artifact metadata, and quota update atomically.
+	err = r.db.WithTx(req.Context(), func(ctx context.Context) error {
+		if err := r.db.PutManifest(ctx, fullRepo, ref, mediaType, digest, canonical); err != nil {
+			return err
+		}
+		if metadata := extractArtifactMetadata(canonical, mediaType, digest); metadata != nil {
+			if err := r.db.SetArtifactMetadata(ctx, metadata); err != nil {
+				log.Printf("[PUT_MANIFEST] Warning: failed to store artifact metadata: %v", err)
+			} else {
+				log.Printf("[PUT_MANIFEST] Stored artifact metadata: type=%s subject=%s", metadata.ArtifactType, metadata.SubjectDigest)
+			}
+		}
+		if quota != nil {
+			r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(canonical)))
+		}
+		return nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Extract and store artifact metadata (OCI artifacts, Helm charts, etc.)
-	if metadata := extractArtifactMetadata(canonical, mediaType, digest); metadata != nil {
-		if err := r.db.SetArtifactMetadata(req.Context(), metadata); err != nil {
-			log.Printf("[PUT_MANIFEST] Warning: failed to store artifact metadata: %v", err)
-			// Don't fail the request if metadata storage fails
-		} else {
-			log.Printf("[PUT_MANIFEST] Stored artifact metadata: type=%s subject=%s", metadata.ArtifactType, metadata.SubjectDigest)
-		}
-	}
-
-	// Update Quota Usage
-	if quota != nil {
-		r.db.UpdateQuotaUsage(req.Context(), quotaNs, int64(len(canonical)))
 	}
 
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
@@ -765,6 +781,11 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	fullRepo, _ := getRepoContext(req)
 	uuid := chi.URLParam(req, "uuid")
 
+	// Serialize concurrent PATCH requests for the same UUID to prevent
+	// data corruption from simultaneous appends to the same temp file.
+	unlock := r.lockUpload(uuid)
+	defer unlock()
+
 	// Limit upload size per chunk
 	maxUploadSize := int64(10 * 1024 * 1024 * 1024) // 10GB
 	if req.ContentLength > maxUploadSize {
@@ -994,26 +1015,37 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// 1. Move the verified temp file to final location
-	err = r.storage.Move(req.Context(), tempPath, finalPath)
+	// Use singleflight to deduplicate concurrent finalizations of the same
+	// digest. Only the first caller performs the move+DB write; others share
+	// the result.
+	_, err, _ = r.blobGroup.Do(digest, func() (interface{}, error) {
+		// 1. Move the verified temp file to final location.
+		if moveErr := r.storage.Move(req.Context(), tempPath, finalPath); moveErr != nil {
+			return nil, moveErr
+		}
+		// 2. Record blob and update quota atomically.
+		txErr := r.db.WithTx(req.Context(), func(ctx context.Context) error {
+			if err := r.db.PutBlob(ctx, digest, size, "application/octet-stream"); err != nil {
+				return err
+			}
+			if quota != nil {
+				r.db.UpdateQuotaUsage(ctx, quotaNs, size)
+			}
+			return nil
+		})
+		if txErr != nil {
+			r.storage.Delete(req.Context(), finalPath)
+			return nil, txErr
+		}
+		return nil, nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Record in database
-	err = r.db.PutBlob(req.Context(), digest, size, "application/octet-stream")
-	if err != nil {
-		// Rollback file move on DB failure
-		r.storage.Delete(req.Context(), finalPath)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Update Quota Usage
-	if quota != nil {
-		r.db.UpdateQuotaUsage(req.Context(), quotaNs, size)
-	}
+	// Upload is finalized; remove the per-UUID mutex so it can be GC'd.
+	r.uploadMu.Delete(uuid)
 
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, digest))
 	w.Header().Set("Docker-Content-Digest", digest)
