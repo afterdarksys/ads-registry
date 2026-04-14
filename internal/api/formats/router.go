@@ -1,6 +1,7 @@
 package formats
 
 import (
+	"context"
 	"log"
 
 	"github.com/go-chi/chi/v5"
@@ -29,7 +30,13 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, tokenService 
 	return &Router{
 		db:      dbStore,
 		storage: storageProvider,
-		authMid: auth.NewMiddleware(tokenService, devMode),
+		authMid: auth.NewMiddleware(tokenService, devMode, func(ctx context.Context, u, p string) ([]string, error) {
+			user, err := dbStore.AuthenticateUser(ctx, u, p)
+			if err != nil {
+				return nil, err
+			}
+			return user.Scopes, nil
+		}),
 	}
 }
 

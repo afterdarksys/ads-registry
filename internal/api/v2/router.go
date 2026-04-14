@@ -86,7 +86,13 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		db:            dbStore,
 		storage:       storageProvider,
 		tokenTs:       ts,
-		authMid:       auth.NewMiddleware(ts, devMode),
+		authMid: auth.NewMiddleware(ts, devMode, func(ctx context.Context, u, p string) ([]string, error) {
+			user, err := dbStore.AuthenticateUser(ctx, u, p)
+			if err != nil {
+				return nil, err
+			}
+			return user.Scopes, nil
+		}),
 		enforcer:      enf,
 		scanner:       scannerSvc,
 		starlark:      star,

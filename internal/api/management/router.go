@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -37,7 +38,13 @@ func NewRouter(dbStore db.Store, ts *auth.TokenService, enf *policy.Enforcer, st
 	return &Router{
 		db:       dbStore,
 		tokenTs:  ts,
-		authMid:  auth.NewMiddleware(ts, devMode),
+		authMid: auth.NewMiddleware(ts, devMode, func(ctx context.Context, u, p string) ([]string, error) {
+			user, err := dbStore.AuthenticateUser(ctx, u, p)
+			if err != nil {
+				return nil, err
+			}
+			return user.Scopes, nil
+		}),
 		enforcer: enf,
 		starlark: star,
 	}

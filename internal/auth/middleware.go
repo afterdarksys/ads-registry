@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,17 +15,23 @@ type userContextKey string
 
 var UserContext = userContextKey("user")
 
+// CredentialValidator validates a username/password and returns the user's scopes.
+// Used to support Basic auth in addition to bearer tokens.
+type CredentialValidator func(ctx context.Context, username, password string) ([]string, error)
+
 type Middleware struct {
-	tokenService  *TokenService
-	serviceName   string
-	developerMode bool
+	tokenService        *TokenService
+	serviceName         string
+	developerMode       bool
+	credentialValidator CredentialValidator
 }
 
-func NewMiddleware(ts *TokenService, developerMode bool) *Middleware {
+func NewMiddleware(ts *TokenService, developerMode bool, validator CredentialValidator) *Middleware {
 	return &Middleware{
-		tokenService:  ts,
-		serviceName:   ts.service,
-		developerMode: developerMode,
+		tokenService:        ts,
+		serviceName:         ts.service,
+		developerMode:       developerMode,
+		credentialValidator: validator,
 	}
 }
 
@@ -75,6 +82,51 @@ func (m *Middleware) Protect(next http.Handler) http.Handler {
 		}
 
 		authHeader := r.Header.Get("Authorization")
+
+		// Basic auth path — containerd (k3s ≤1.34) cannot complete the bearer
+		// token exchange, so we validate credentials inline and proceed directly.
+		if strings.HasPrefix(authHeader, "Basic ") && m.credentialValidator != nil {
+			username, password, ok := parseBasicAuth(authHeader)
+			if !ok {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			scopes, err := m.credentialValidator(r.Context(), username, password)
+			if err != nil {
+				log.Printf("[AUTH] Basic auth failed for %s: %v", username, err)
+				w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s://%s/auth/token",service="%s"`, scheme, r.Host, m.serviceName))
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			action := getRequiredAction(r)
+			fullRepo := extractRepo(r.URL.Path)
+
+			authorized := r.URL.Path == "/v2/" || r.URL.Path == "/v2/_catalog"
+			if !authorized {
+				for _, s := range scopes {
+					if s == "*" || matchesScope(s, "repository", fullRepo, []string{action}) {
+						authorized = true
+						break
+					}
+				}
+			}
+
+			if !authorized {
+				log.Printf("[AUTH] Basic auth denied: user=%s repo=%s action=%s", username, fullRepo, action)
+				http.Error(w, `{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`, http.StatusForbidden)
+				return
+			}
+
+			claims := Claims{
+				Access: []AccessEntry{{Type: "repository", Name: fullRepo, Actions: []string{action}}},
+			}
+			claims.Subject = username
+			ctx := context.WithValue(r.Context(), UserContext, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			// Require auth
 			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s://%s/auth/token",service="%s"`, scheme, r.Host, m.serviceName))
@@ -227,4 +279,33 @@ func getRequiredAction(r *http.Request) string {
 	default:
 		return "pull"
 	}
+}
+
+// extractRepo strips /v2/ prefix and endpoint suffixes to get the repository path.
+func extractRepo(urlPath string) string {
+	for _, suffix := range []string{"/blobs/", "/manifests/", "/tags/", "/referrers/"} {
+		if idx := strings.Index(urlPath, suffix); idx != -1 {
+			urlPath = urlPath[:idx]
+			break
+		}
+	}
+	repo := strings.TrimPrefix(urlPath, "/v2/")
+	if repo == "" || repo == "/" {
+		return "*"
+	}
+	return repo
+}
+
+// parseBasicAuth decodes an "Authorization: Basic <base64>" header value.
+func parseBasicAuth(header string) (username, password string, ok bool) {
+	encoded := strings.TrimPrefix(header, "Basic ")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
