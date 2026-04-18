@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ryan/ads-registry/internal/auth"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code
@@ -82,7 +83,11 @@ func HTTPLoggingMiddleware(logger *Logger) func(next http.Handler) http.Handler 
 
 			// Log request with full details
 			duration := time.Since(start)
-			logger.LogHTTPRequest(r, rw.statusCode, duration, reqID)
+			userID := ""
+			if claims, ok := r.Context().Value(auth.UserContext).(auth.Claims); ok {
+				userID = claims.Subject
+			}
+			logger.LogHTTPRequest(r, rw.statusCode, duration, reqID, userID)
 		})
 	}
 }

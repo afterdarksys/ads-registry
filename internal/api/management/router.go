@@ -23,6 +23,18 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// actorFromReq extracts the authenticated actor and client IP from the request.
+func actorFromReq(r *http.Request) (actor, ip string) {
+	if claims, ok := r.Context().Value(auth.UserContext).(auth.Claims); ok {
+		actor = claims.Subject
+	}
+	ip = r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.Split(fwd, ",")[0]
+	}
+	return
+}
+
 type Router struct {
 	db         db.Store
 	authMid    *auth.Middleware
@@ -148,6 +160,9 @@ func (r *Router) Register(mux chi.Router) {
 			adminAPI.Patch("/repositories/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
 			adminAPI.Patch("/repositories/{org2}/{org1}/{org}/{namespace}/{repo}/tags/{reference}", r.patchTag)
 
+			// Audit Logs (SOC2)
+			adminAPI.Get("/audit-logs", r.listAuditLogs)
+
 			// LDAP
 			adminAPI.Get("/ldap/status", r.getLDAPStatus)
 			adminAPI.Post("/ldap/sync", r.postLDAPSync)
@@ -256,6 +271,8 @@ func (r *Router) createUser(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "user.create", ResourceType: "user", ResourceID: payload.Username, Outcome: "success"})
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -274,6 +291,8 @@ func (r *Router) deleteUser(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "user.delete", ResourceType: "user", ResourceID: username, Outcome: "success"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -300,6 +319,8 @@ func (r *Router) updateUser(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "user.update_scopes", ResourceType: "user", ResourceID: username, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -337,6 +358,8 @@ func (r *Router) resetPassword(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "user.reset_password", ResourceType: "user", ResourceID: username, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -363,6 +386,8 @@ func (r *Router) setQuota(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "quota.set", ResourceType: "namespace", ResourceID: payload.Namespace, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -387,6 +412,8 @@ func (r *Router) createGroup(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "group.create", ResourceType: "group", ResourceID: payload.Name, Outcome: "success"})
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -403,6 +430,8 @@ func (r *Router) addUserToGroup(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "group.add_member", ResourceType: "group", ResourceID: groupName, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -538,6 +567,8 @@ func (r *Router) addPolicy(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "policy.create", ResourceType: "policy", ResourceID: payload.Expression, Outcome: "success"})
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -561,6 +592,8 @@ func (r *Router) deletePolicy(w http.ResponseWriter, req *http.Request) {
 	// Reload the enforcer rules memory
 	r.enforcer.ReloadPolicies(req.Context())
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "policy.delete", ResourceType: "policy", ResourceID: idStr, Outcome: "success"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -639,6 +672,8 @@ func (r *Router) putScript(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "script.update", ResourceType: "script", ResourceID: name, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -661,6 +696,8 @@ func (r *Router) enableScript(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "script.enable", ResourceType: "script", ResourceID: name, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -683,6 +720,8 @@ func (r *Router) disableScript(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "script.disable", ResourceType: "script", ResourceID: name, Outcome: "success"})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -703,6 +742,8 @@ func (r *Router) deleteScript(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "script.delete", ResourceType: "script", ResourceID: name, Outcome: "success"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -899,6 +940,8 @@ func (r *Router) patchTag(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	actor, ip := actorFromReq(req)
+	r.db.WriteAuditLog(req.Context(), db.AuditEntry{Actor: actor, ActorIP: ip, Action: "tag.set_immutable", ResourceType: "tag", ResourceID: repo + ":" + reference, Outcome: "success"})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -982,4 +1025,16 @@ func (r *Router) getOIDCStatus(w http.ResponseWriter, req *http.Request) {
 		"issuer":    r.oidcConfig.Issuer,
 		"client_id": r.oidcConfig.ClientID,
 	})
+}
+
+// listAuditLogs returns the most recent audit log entries.
+// GET /api/v1/management/audit-logs
+func (r *Router) listAuditLogs(w http.ResponseWriter, req *http.Request) {
+	entries, err := r.db.ListAuditLogs(req.Context(), 500)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries)
 }

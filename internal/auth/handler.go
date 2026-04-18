@@ -31,12 +31,31 @@ func (h *Handler) Register(mux chi.Router) {
 	mux.Post("/auth/refresh", h.refreshHandler)
 }
 
+// TokenHandlerFunc returns the token handler as an http.HandlerFunc for use
+// with custom middleware wrapping (e.g. tighter rate limits).
+func (h *Handler) TokenHandlerFunc() http.HandlerFunc {
+	return h.tokenHandler
+}
+
+// RefreshHandlerFunc returns the refresh handler as an http.HandlerFunc.
+func (h *Handler) RefreshHandlerFunc() http.HandlerFunc {
+	return h.refreshHandler
+}
+
 func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 	// 1. Basic Auth check for username/password
 	user, pass, ok := req.BasicAuth()
 	if !ok {
 		w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Lockout: block after 10 failed attempts in 15 minutes
+	since := time.Now().Add(-15 * time.Minute)
+	failures, _ := h.db.CountRecentFailedLogins(req.Context(), user, since)
+	if failures >= 10 {
+		http.Error(w, `{"errors":[{"code":"TOO_MANY_ATTEMPTS","message":"account temporarily locked due to repeated failures"}]}`, http.StatusTooManyRequests)
 		return
 	}
 
@@ -87,6 +106,7 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 
 		if !tokenValid {
 			log.Printf("[AUTH] Invalid or expired access token for user %s", actualUsername)
+			h.db.RecordLoginAttempt(req.Context(), actualUsername, req.RemoteAddr, false)
 			w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -147,11 +167,13 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 					}
 					dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
 				} else {
+					h.db.RecordLoginAttempt(req.Context(), user, req.RemoteAddr, false)
 					w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
 			} else {
+				h.db.RecordLoginAttempt(req.Context(), user, req.RemoteAddr, false)
 				w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
@@ -222,6 +244,9 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 			Actions: []string{"*"},
 		})
 	}
+
+	// Record successful login
+	h.db.RecordLoginAttempt(req.Context(), user, req.RemoteAddr, true)
 
 	// 4. Generate JWT
 	token, err := h.tokenService.GenerateToken(user, grantedAccess)
