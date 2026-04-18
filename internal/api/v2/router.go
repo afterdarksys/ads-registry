@@ -14,8 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
@@ -142,9 +144,11 @@ func (r *Router) checkVulnGate(ctx context.Context, digest string) error {
 
 func (r *Router) Register(mux chi.Router) {
 
-	// The Auth Endpoint
+	// The Auth Endpoint — registered with a tighter per-IP rate limit (20 req/min)
+	// to slow brute-force attacks. The global rate limit is 10000/min.
 	authHandler := auth.NewHandler(r.tokenTs, r.db, r.ldapClient)
-	authHandler.Register(mux)
+	mux.With(httprate.LimitByIP(20, 1*time.Minute)).Get("/auth/token", authHandler.TokenHandlerFunc())
+	mux.Post("/auth/refresh", authHandler.RefreshHandlerFunc())
 
 	// API Endpoints
 	mux.Route("/v2", func(api chi.Router) {
@@ -184,10 +188,9 @@ func (r *Router) Register(mux chi.Router) {
 		api.Group(func(repoGroup chi.Router) {
 			repoGroup.Use(r.authMid.Protect)
 
-			// DISABLED for initial testing - uncomment to enable policy enforcement
-			// if r.enforcer != nil {
-			// 	repoGroup.Use(r.enforcer.Protect)
-			// }
+			if r.enforcer != nil {
+				repoGroup.Use(r.enforcer.Protect)
+			}
 
 			// FIVE-level repository (register FIRST - most specific)
 			repoGroup.Get("/{org2}/{org1}/{org}/{namespace}/{repo}/tags/list", r.getTags)

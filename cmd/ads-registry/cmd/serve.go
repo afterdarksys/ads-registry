@@ -211,6 +211,15 @@ func runServer() {
 	}
 
 	logger.Info("ADS Container Registry starting up")
+
+	if cfg.Server.DeveloperMode {
+		env := os.Getenv("REGISTRY_ENV")
+		if env == "production" || env == "prod" {
+			log.Fatalf("FATAL: developer_mode is enabled but REGISTRY_ENV=%s. Refusing to start.", env)
+		}
+		logger.Warning("DEVELOPER MODE: auth bypassed — do NOT use in production")
+	}
+
 	if cfg.Logging.Syslog.Enabled {
 		logger.Info(fmt.Sprintf("Syslog enabled: %s", cfg.Logging.Syslog.Server))
 	}
