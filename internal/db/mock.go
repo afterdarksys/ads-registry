@@ -229,6 +229,22 @@ func (m *MockStore) IsTagImmutable(ctx context.Context, repo, reference string) 
 	return false, nil
 }
 
+func (m *MockStore) WriteAuditLog(ctx context.Context, entry AuditEntry) error {
+	return nil
+}
+
+func (m *MockStore) ListAuditLogs(ctx context.Context, limit int) ([]AuditEntry, error) {
+	return []AuditEntry{}, nil
+}
+
+func (m *MockStore) RecordLoginAttempt(ctx context.Context, username, ip string, success bool) error {
+	return nil
+}
+
+func (m *MockStore) CountRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error) {
+	return 0, nil
+}
+
 func (m *MockStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }

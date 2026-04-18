@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -236,6 +237,33 @@ func (s *PostgresStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
 	CREATE INDEX IF NOT EXISTS idx_universal_artifact_metadata_jsonb ON universal_artifact_metadata USING GIN (raw_data);
 	CREATE INDEX IF NOT EXISTS idx_universal_artifacts_lookup ON universal_artifacts(format, namespace, package_name);
+
+	-- Audit log for SOC2 compliance: every admin/auth event
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id BIGSERIAL PRIMARY KEY,
+		timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		actor TEXT NOT NULL,
+		actor_ip TEXT NOT NULL DEFAULT '',
+		action TEXT NOT NULL,
+		resource_type TEXT NOT NULL DEFAULT '',
+		resource_id TEXT NOT NULL DEFAULT '',
+		outcome TEXT NOT NULL DEFAULT 'success',
+		detail JSONB
+	);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+
+	-- Failed login tracking for lockout
+	CREATE TABLE IF NOT EXISTS login_attempts (
+		id BIGSERIAL PRIMARY KEY,
+		username TEXT NOT NULL,
+		ip TEXT NOT NULL DEFAULT '',
+		success BOOLEAN NOT NULL DEFAULT FALSE,
+		attempted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username);
+	CREATE INDEX IF NOT EXISTS idx_login_attempts_attempted_at ON login_attempts(attempted_at);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -1302,4 +1330,56 @@ func (s *PostgresStore) UpdateAccessTokenLastUsed(ctx context.Context, tokenID i
 		tokenID,
 	)
 	return err
+}
+
+// --------------------------------------------------------------------------------
+// Audit Logging (SOC2)
+// --------------------------------------------------------------------------------
+
+func (s *PostgresStore) WriteAuditLog(ctx context.Context, entry db.AuditEntry) error {
+	detail, _ := json.Marshal(entry.Detail)
+	_, err := s.querier(ctx).ExecContext(ctx,
+		`INSERT INTO audit_logs (actor, actor_ip, action, resource_type, resource_id, outcome, detail)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		entry.Actor, entry.ActorIP, entry.Action, entry.ResourceType, entry.ResourceID, entry.Outcome, detail)
+	return err
+}
+
+func (s *PostgresStore) ListAuditLogs(ctx context.Context, limit int) ([]db.AuditEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.querier(ctx).QueryContext(ctx,
+		`SELECT id, timestamp, actor, actor_ip, action, resource_type, resource_id, outcome, detail
+		 FROM audit_logs ORDER BY timestamp DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.AuditEntry
+	for rows.Next() {
+		var e db.AuditEntry
+		var detail []byte
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Actor, &e.ActorIP, &e.Action, &e.ResourceType, &e.ResourceID, &e.Outcome, &detail); err != nil {
+			return nil, err
+		}
+		json.Unmarshal(detail, &e.Detail)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) RecordLoginAttempt(ctx context.Context, username, ip string, success bool) error {
+	_, err := s.querier(ctx).ExecContext(ctx,
+		`INSERT INTO login_attempts (username, ip, success) VALUES ($1, $2, $3)`,
+		username, ip, success)
+	return err
+}
+
+func (s *PostgresStore) CountRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error) {
+	var count int
+	err := s.querier(ctx).QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM login_attempts WHERE username=$1 AND success=false AND attempted_at > $2`,
+		username, since).Scan(&count)
+	return count, err
 }

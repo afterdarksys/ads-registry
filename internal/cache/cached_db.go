@@ -367,6 +367,22 @@ func (s *CachedStore) IsTagImmutable(ctx context.Context, repo, reference string
 	return s.db.IsTagImmutable(ctx, repo, reference)
 }
 
+func (s *CachedStore) WriteAuditLog(ctx context.Context, entry db.AuditEntry) error {
+	return s.db.WriteAuditLog(ctx, entry)
+}
+
+func (s *CachedStore) ListAuditLogs(ctx context.Context, limit int) ([]db.AuditEntry, error) {
+	return s.db.ListAuditLogs(ctx, limit)
+}
+
+func (s *CachedStore) RecordLoginAttempt(ctx context.Context, username, ip string, success bool) error {
+	return s.db.RecordLoginAttempt(ctx, username, ip, success)
+}
+
+func (s *CachedStore) CountRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error) {
+	return s.db.CountRecentFailedLogins(ctx, username, since)
+}
+
 func (s *CachedStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return s.db.WithTx(ctx, fn)
 }

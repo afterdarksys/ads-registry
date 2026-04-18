@@ -203,6 +203,33 @@ func (s *SQLiteStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
 	CREATE INDEX IF NOT EXISTS idx_universal_artifacts_lookup ON universal_artifacts(format, namespace, package_name);
 	CREATE INDEX IF NOT EXISTS idx_universal_artifact_blobs_artifact ON universal_artifact_blobs(artifact_id);
+
+	-- Audit log for SOC2 compliance
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+		actor TEXT NOT NULL,
+		actor_ip TEXT NOT NULL DEFAULT '',
+		action TEXT NOT NULL,
+		resource_type TEXT NOT NULL DEFAULT '',
+		resource_id TEXT NOT NULL DEFAULT '',
+		outcome TEXT NOT NULL DEFAULT 'success',
+		detail TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+
+	-- Failed login tracking for lockout
+	CREATE TABLE IF NOT EXISTS login_attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL,
+		ip TEXT NOT NULL DEFAULT '',
+		success INTEGER NOT NULL DEFAULT 0,
+		attempted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username);
+	CREATE INDEX IF NOT EXISTS idx_login_attempts_attempted_at ON login_attempts(attempted_at);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -1338,4 +1365,60 @@ func (s *SQLiteStore) GetArtifactStatistics(ctx context.Context, format, namespa
 	}
 
 	return stats, nil
+}
+
+// --------------------------------------------------------------------------------
+// Audit Logging (SOC2) — SQLite implementation
+// --------------------------------------------------------------------------------
+
+func (s *SQLiteStore) WriteAuditLog(ctx context.Context, entry db.AuditEntry) error {
+	detail, _ := json.Marshal(entry.Detail)
+	_, err := s.querier(ctx).ExecContext(ctx,
+		`INSERT INTO audit_logs (actor, actor_ip, action, resource_type, resource_id, outcome, detail)
+		 VALUES (?,?,?,?,?,?,?)`,
+		entry.Actor, entry.ActorIP, entry.Action, entry.ResourceType, entry.ResourceID, entry.Outcome, string(detail))
+	return err
+}
+
+func (s *SQLiteStore) ListAuditLogs(ctx context.Context, limit int) ([]db.AuditEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.querier(ctx).QueryContext(ctx,
+		`SELECT id, timestamp, actor, actor_ip, action, resource_type, resource_id, outcome, detail
+		 FROM audit_logs ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.AuditEntry
+	for rows.Next() {
+		var e db.AuditEntry
+		var detail string
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Actor, &e.ActorIP, &e.Action, &e.ResourceType, &e.ResourceID, &e.Outcome, &detail); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(detail), &e.Detail)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) RecordLoginAttempt(ctx context.Context, username, ip string, success bool) error {
+	successInt := 0
+	if success {
+		successInt = 1
+	}
+	_, err := s.querier(ctx).ExecContext(ctx,
+		`INSERT INTO login_attempts (username, ip, success) VALUES (?,?,?)`,
+		username, ip, successInt)
+	return err
+}
+
+func (s *SQLiteStore) CountRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error) {
+	var count int
+	err := s.querier(ctx).QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM login_attempts WHERE username=? AND success=0 AND attempted_at > ?`,
+		username, since).Scan(&count)
+	return count, err
 }

@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+// AuditEntry is a single audit log record.
+type AuditEntry struct {
+	ID           int64
+	Timestamp    time.Time
+	Actor        string
+	ActorIP      string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Outcome      string
+	Detail       map[string]string
+}
+
 var (
 	ErrNotFound = errors.New("record not found")
 )
@@ -85,6 +98,12 @@ type Store interface {
 
 	// Multi-format artifact methods
 	ArtifactStore
+
+	// Audit Logging (SOC2)
+	WriteAuditLog(ctx context.Context, entry AuditEntry) error
+	ListAuditLogs(ctx context.Context, limit int) ([]AuditEntry, error)
+	RecordLoginAttempt(ctx context.Context, username, ip string, success bool) error
+	CountRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error)
 
 	// WithTx executes fn inside a database transaction. The context passed to fn
 	// carries the active transaction so all Store methods called with that
