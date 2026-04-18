@@ -203,6 +203,28 @@ func (s *PostgresStore) migrate() error {
 		UNIQUE(artifact_id)
 	);
 
+	-- OCI artifact metadata (referrers API, Helm charts, etc.)
+	-- subject_digest is stored as plain text (no FK) because the same digest
+	-- can appear across multiple repos/tags in the manifests table.
+	CREATE TABLE IF NOT EXISTS artifact_metadata (
+		digest VARCHAR(255) PRIMARY KEY,
+		artifact_type VARCHAR(255) NOT NULL,
+		subject_digest VARCHAR(255),
+		chart_name VARCHAR(255),
+		chart_version VARCHAR(100),
+		app_version VARCHAR(100),
+		metadata_json TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_artifact_type ON artifact_metadata(artifact_type);
+	CREATE INDEX IF NOT EXISTS idx_subject_digest ON artifact_metadata(subject_digest);
+
+	ALTER TABLE manifests ADD COLUMN IF NOT EXISTS artifact_type VARCHAR(255);
+	ALTER TABLE manifests ADD COLUMN IF NOT EXISTS subject_digest VARCHAR(255);
+	CREATE INDEX IF NOT EXISTS idx_manifests_subject ON manifests(subject_digest) WHERE subject_digest IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_manifests_artifact_type ON manifests(artifact_type) WHERE artifact_type IS NOT NULL;
+
 	-- Performance indexes
 	CREATE INDEX IF NOT EXISTS idx_manifests_digest ON manifests(digest);
 	CREATE INDEX IF NOT EXISTS idx_manifests_repo_id ON manifests(repo_id);
@@ -1019,12 +1041,16 @@ func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.Ar
 	if metadata.MetadataJSON != "" {
 		metadataJSON = metadata.MetadataJSON
 	}
+	var subjectDigest interface{}
+	if metadata.SubjectDigest != "" {
+		subjectDigest = metadata.SubjectDigest
+	}
 	_, err := s.querier(ctx).ExecContext(ctx, `
 		INSERT INTO artifact_metadata (digest, artifact_type, subject_digest, chart_name, chart_version, app_version, metadata_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (digest) DO UPDATE
 		SET artifact_type = $2, subject_digest = $3, chart_name = $4, chart_version = $5, app_version = $6, metadata_json = $7, updated_at = CURRENT_TIMESTAMP
-	`, metadata.Digest, metadata.ArtifactType, metadata.SubjectDigest, metadata.ChartName, metadata.ChartVersion, metadata.AppVersion, metadataJSON)
+	`, metadata.Digest, metadata.ArtifactType, subjectDigest, metadata.ChartName, metadata.ChartVersion, metadata.AppVersion, metadataJSON)
 
 	// Also update the manifests table for easier querying
 	if err == nil {
@@ -1032,7 +1058,7 @@ func (s *PostgresStore) SetArtifactMetadata(ctx context.Context, metadata *db.Ar
 			UPDATE manifests
 			SET artifact_type = $1, subject_digest = $2
 			WHERE digest = $3
-		`, metadata.ArtifactType, metadata.SubjectDigest, metadata.Digest)
+		`, metadata.ArtifactType, subjectDigest, metadata.Digest)
 	}
 
 	return err

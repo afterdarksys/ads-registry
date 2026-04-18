@@ -579,17 +579,10 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Store the manifest, artifact metadata, and quota update atomically.
+	// Store the manifest and quota update atomically.
 	err = r.db.WithTx(req.Context(), func(ctx context.Context) error {
 		if err := r.db.PutManifest(ctx, fullRepo, ref, mediaType, digest, canonical); err != nil {
 			return err
-		}
-		if metadata := extractArtifactMetadata(canonical, mediaType, digest); metadata != nil {
-			if err := r.db.SetArtifactMetadata(ctx, metadata); err != nil {
-				log.Printf("[PUT_MANIFEST] Warning: failed to store artifact metadata: %v", err)
-			} else {
-				log.Printf("[PUT_MANIFEST] Stored artifact metadata: type=%s subject=%s", metadata.ArtifactType, metadata.SubjectDigest)
-			}
 		}
 		if quota != nil {
 			r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(canonical)))
@@ -599,6 +592,16 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Best-effort: store artifact metadata outside the transaction so a failure
+	// (e.g. missing table, FK constraint) never rolls back the manifest push.
+	if metadata := extractArtifactMetadata(canonical, mediaType, digest); metadata != nil {
+		if err := r.db.SetArtifactMetadata(req.Context(), metadata); err != nil {
+			log.Printf("[PUT_MANIFEST] Warning: failed to store artifact metadata: %v", err)
+		} else {
+			log.Printf("[PUT_MANIFEST] Stored artifact metadata: type=%s subject=%s", metadata.ArtifactType, metadata.SubjectDigest)
+		}
 	}
 
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
