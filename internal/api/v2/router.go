@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -713,7 +714,11 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err == nil && start >= 0 {
 				reader, err := r.storage.Reader(req.Context(), path, start)
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
+					if errors.Is(err, storage.ErrNotFound) {
+						http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown to storage"}]}`, http.StatusNotFound)
+					} else {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+					}
 					return
 				}
 				defer reader.Close()
@@ -725,7 +730,11 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 		// No Range header – serve full blob
 		reader, err := r.storage.Reader(req.Context(), path, 0)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if errors.Is(err, storage.ErrNotFound) {
+				http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown to storage"}]}`, http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 		defer reader.Close()
