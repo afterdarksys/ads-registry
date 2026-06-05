@@ -46,6 +46,18 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 	// 1. Basic Auth check for username/password
 	user, pass, ok := req.BasicAuth()
 	if !ok {
+		// Fallback: OAuth2 password grant (POST form body) used by buildkit/containerd
+		if req.Method == http.MethodPost {
+			if err := req.ParseForm(); err == nil {
+				u := req.FormValue("username")
+				p := req.FormValue("password")
+				if u != "" && p != "" {
+					user, pass, ok = u, p, true
+				}
+			}
+		}
+	}
+	if !ok {
 		w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -184,7 +196,11 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 
 	// 3. Parse Scopes from ?scope=repository:library/ubuntu:pull,push
 	// Docker might request multiple scopes, but standard clients usually just ask for one.
+	// For POST (OAuth2 grant), scope comes from the form body, not the URL.
 	qScope := req.URL.Query().Get("scope")
+	if qScope == "" && req.Method == http.MethodPost {
+		qScope = req.FormValue("scope")
+	}
 	var grantedAccess []AccessEntry
 
 	// Check if user has wildcard admin scope

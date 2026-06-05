@@ -523,9 +523,8 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("failed to init CEL enforcer: %v", err)
 	}
-	// Add default example whitelist/blacklist rules
+	// Seed the blacklist guard only — do not add write-blocking rules here.
 	enf.AddRule(context.Background(), `request.namespace != "blacklist"`)
-	enf.AddRule(context.Background(), `request.method == "GET" || request.namespace == "trusted"`)
 
 	// 3. Initialize Auth Token Service
 	tokenService, err := registryAuth.NewTokenService(cfg.Auth)

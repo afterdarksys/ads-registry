@@ -37,29 +37,22 @@ func NewMiddleware(ts *TokenService, developerMode bool, validator CredentialVal
 
 // GetScheme determines the protocol scheme (http/https) from the request
 func GetScheme(r *http.Request) string {
-	log.Printf("[AUTH/getScheme] Called with Host=%s, TLS=%v, X-Forwarded-Proto=%s",
-		r.Host, r.TLS != nil, r.Header.Get("X-Forwarded-Proto"))
-
 	// Force HTTP for localhost to avoid TLS issues
 	if strings.HasPrefix(r.Host, "localhost:") || strings.HasPrefix(r.Host, "127.0.0.1:") {
-		log.Printf("[AUTH] Forcing HTTP for localhost: Host=%s", r.Host)
 		return "http"
 	}
 
 	// Check if request came via TLS
 	if r.TLS != nil {
-		log.Printf("[AUTH] Detected HTTPS via r.TLS: Host=%s", r.Host)
 		return "https"
 	}
 
 	// Check X-Forwarded-Proto header (set by reverse proxies)
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		log.Printf("[AUTH] Using X-Forwarded-Proto=%s: Host=%s", proto, r.Host)
 		return proto
 	}
 
 	// Default to http
-	log.Printf("[AUTH] Defaulting to HTTP: Host=%s", r.Host)
 	return "http"
 }
 

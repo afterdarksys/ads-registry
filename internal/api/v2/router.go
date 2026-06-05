@@ -149,6 +149,7 @@ func (r *Router) Register(mux chi.Router) {
 	// to slow brute-force attacks. The global rate limit is 10000/min.
 	authHandler := auth.NewHandler(r.tokenTs, r.db, r.ldapClient)
 	mux.With(httprate.LimitByIP(20, 1*time.Minute)).Get("/auth/token", authHandler.TokenHandlerFunc())
+	mux.With(httprate.LimitByIP(20, 1*time.Minute)).Post("/auth/token", authHandler.TokenHandlerFunc())
 	mux.Post("/auth/refresh", authHandler.RefreshHandlerFunc())
 
 	// API Endpoints
@@ -548,17 +549,17 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Re-marshal in canonical form (sorted keys, no whitespace)
+	// Compute digest from the original payload bytes (OCI spec requires verbatim storage)
+	hasher := sha256.New()
+	hasher.Write(payload)
+	digest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+
+	// Re-marshal for internal metadata extraction only (not stored, not used for digest)
 	canonical, err := json.Marshal(manifest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	// Compute digest using canonical JSON
-	hasher := sha256.New()
-	hasher.Write(canonical)
-	digest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
 	// Enforce Quota (use namespace for quota checking)
 	quota, err := r.db.CheckQuota(req.Context(), quotaNs)
@@ -568,7 +569,7 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	}
 	if quota != nil {
 		// Calculate new quota
-		if quota.UsedBytes+int64(len(canonical)) > quota.LimitBytes {
+		if quota.UsedBytes+int64(len(payload)) > quota.LimitBytes {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -585,11 +586,11 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 
 	// Store the manifest and quota update atomically.
 	err = r.db.WithTx(req.Context(), func(ctx context.Context) error {
-		if err := r.db.PutManifest(ctx, fullRepo, ref, mediaType, digest, canonical); err != nil {
+		if err := r.db.PutManifest(ctx, fullRepo, ref, mediaType, digest, payload); err != nil {
 			return err
 		}
 		if quota != nil {
-			r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(canonical)))
+			r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(payload)))
 		}
 		return nil
 	})
