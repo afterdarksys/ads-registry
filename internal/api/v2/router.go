@@ -960,10 +960,18 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	finalPath := getPath(fullRepo, digest)
 
 	// Idempotency check: Does this blob already exist?
+	// DB is global (no repo column), but files are stored per-repo. Check both:
+	// if DB says yes but the file is missing at this repo's path, re-upload.
 	exists, err := r.db.BlobExists(req.Context(), digest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if exists {
+		if _, statErr := r.storage.Stat(req.Context(), finalPath); statErr != nil {
+			exists = false
+			log.Printf("[PUT_UPLOAD] blob %s in DB but missing on disk at %s — re-uploading", digest, finalPath)
+		}
 	}
 	if exists {
 		// Clean up partial upload just in case
