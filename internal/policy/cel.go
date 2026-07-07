@@ -80,7 +80,10 @@ func (e *Enforcer) ReloadPolicies(ctx context.Context) error {
 			log.Printf("[Policy] Failed to compile policy config ID %d: %v", p.ID, issues.Err())
 			continue
 		}
-		prg, err := e.env.Program(ast)
+		prg, err := e.env.Program(ast,
+			cel.EvalOptions(cel.OptOptimize),
+			cel.CostLimit(1_000_000),
+		)
 		if err != nil {
 			log.Printf("[Policy] Failed to program policy config ID %d: %v", p.ID, err)
 			continue
@@ -108,7 +111,10 @@ func (e *Enforcer) AddRule(ctx context.Context, expression string) error {
 		return fmt.Errorf("compile error: %s", issues.Err())
 	}
 
-	_, err := e.env.Program(ast)
+	_, err := e.env.Program(ast,
+		cel.EvalOptions(cel.OptOptimize),
+		cel.CostLimit(1_000_000),
+	)
 	if err != nil {
 		return fmt.Errorf("program error: %s", err)
 	}
@@ -213,9 +219,14 @@ func (e *Enforcer) Protect(next http.Handler) http.Handler {
 		e.mu.RLock()
 		defer e.mu.RUnlock()
 
+		// Bound evaluation time to 2 seconds to prevent CPU-exhaustion DoS
+		// from adversarial CEL expressions.
+		evalCtx, evalCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer evalCancel()
+
 		allowed := true
 		for i, rule := range e.rules {
-			out, _, err := rule.Eval(vars)
+			out, _, err := rule.ContextEval(evalCtx, vars)
 			if err != nil {
 				log.Printf("CEL Evaluation Error on rule %d: %v", i, err)
 				http.Error(w, `{"errors":[{"code":"POLICY_ERROR","message":"internal policy enforcement failure"}]}`, http.StatusInternalServerError)

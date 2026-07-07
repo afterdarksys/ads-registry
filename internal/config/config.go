@@ -56,6 +56,23 @@ type ServerConfig struct {
 	MaxHeaderBytes    int           `json:"max_header_bytes"`
 	DeveloperMode     bool          `json:"developer_mode"`
 	TLS               TLSConfig     `json:"tls"`
+
+	// MaxUploadSize caps blob/artifact upload bodies in bytes (default 10 GiB).
+	// Enforced by upload handlers via http.MaxBytesReader / io.LimitReader.
+	MaxUploadSize int64 `json:"max_upload_size"`
+	// MaxManifestSize caps manifest and package-metadata bodies in bytes
+	// (default 10 MiB). Metadata should never be large; a small cap blunts
+	// memory-exhaustion via oversized JSON/YAML.
+	MaxManifestSize int64 `json:"max_manifest_size"`
+	// RateLimitRPM is the per-IP request-per-minute limit (default 10000).
+	RateLimitRPM int `json:"rate_limit_rpm"`
+	// CORSAllowedOrigins is the explicit allowlist of browser origins for the
+	// management/web API. Empty means same-origin only (no cross-origin CORS).
+	CORSAllowedOrigins []string `json:"cors_allowed_origins"`
+	// RequireConfiguredDB, when true, makes the server refuse to fall back to
+	// SQLite if the configured PostgreSQL connection fails (fail closed rather
+	// than silently writing production data to an ephemeral SQLite file).
+	RequireConfiguredDB bool `json:"require_configured_db"`
 }
 
 type TLSConfig struct {
@@ -321,9 +338,25 @@ func LoadFile(path string) (*Config, error) {
 		cfg.Server.Port = 5005
 	}
 
-	// Env variables overrides
+	// Env variables overrides — secrets should be supplied via env, not committed
+	// to config files. Each override wins over any file value.
 	if envDSN := os.Getenv("REGISTRY_DB_DSN"); envDSN != "" {
 		cfg.Database.DSN = envDSN
+	}
+	if v := os.Getenv("REGISTRY_OIDC_CLIENT_SECRET"); v != "" {
+		cfg.Auth.OIDC.ClientSecret = v
+	}
+	if v := os.Getenv("REGISTRY_LDAP_BIND_PASSWORD"); v != "" {
+		cfg.Auth.LDAP.BindPassword = v
+	}
+	if v := os.Getenv("REGISTRY_VAULT_TOKEN"); v != "" {
+		cfg.Vault.Token = v
+	}
+	if v := os.Getenv("REGISTRY_REDIS_PASSWORD"); v != "" {
+		cfg.Redis.Password = v
+	}
+	if v := os.Getenv("REGISTRY_ES_PASSWORD"); v != "" {
+		cfg.Logging.Elasticsearch.Password = v
 	}
 	if envCert := os.Getenv("REGISTRY_TLS_CERT"); envCert != "" {
 		cfg.Server.TLS.CertFile = envCert
@@ -348,10 +381,21 @@ func LoadFile(path string) (*Config, error) {
 		cfg.Server.ReadHeaderTimeout = 5 * time.Second
 	}
 
-	// Default to 10MB for headers (sufficient for most registries)
-	// Can be increased for large manifests with many layers
+	// Default to 1MB for headers (matches Go's own default). Registry manifests
+	// travel in the body, not headers, so a large header cap only helps attackers.
 	if cfg.Server.MaxHeaderBytes == 0 {
-		cfg.Server.MaxHeaderBytes = 10 << 20 // 10MB
+		cfg.Server.MaxHeaderBytes = 1 << 20 // 1MB
+	}
+
+	// Upload/manifest size caps and rate limit.
+	if cfg.Server.MaxUploadSize == 0 {
+		cfg.Server.MaxUploadSize = 10 << 30 // 10 GiB — large container layers
+	}
+	if cfg.Server.MaxManifestSize == 0 {
+		cfg.Server.MaxManifestSize = 10 << 20 // 10 MiB — manifests/metadata
+	}
+	if cfg.Server.RateLimitRPM == 0 {
+		cfg.Server.RateLimitRPM = 10000 // per-IP requests/minute
 	}
 
 	if len(cfg.Webhooks) == 0 {

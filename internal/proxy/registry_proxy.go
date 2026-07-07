@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -101,8 +103,9 @@ func (p *RegistryProxy) ProxyManifest(ctx context.Context, upstream, repo, refer
 		return "", "", nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
 	}
 
-	// Read manifest
-	payload, err = io.ReadAll(resp.Body)
+	// Read manifest — cap at 32 MiB to prevent memory exhaustion from a
+	// malicious or misbehaving upstream.
+	payload, err = io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
@@ -178,12 +181,24 @@ func (p *RegistryProxy) ProxyBlob(ctx context.Context, upstream, repo, digest st
 
 	log.Printf("[Proxy] Fetched blob %s (%d bytes)", digest, size)
 
-	// Cache blob asynchronously (don't block the response)
-	go p.cacheBlob(context.Background(), digest, resp.Body, size)
+	// Stream to the client while simultaneously writing to the cache.
+	// io.TeeReader fans the upstream body out to a pipe; cacheBlob reads
+	// from the pipe's read end. proxyBody.Close() closes the pipe writer
+	// which signals EOF to cacheBlob and then closes resp.Body.
+	pr, pw := io.Pipe()
+	tee := io.TeeReader(resp.Body, pw)
 
-	// Return response body to caller (they'll read while we cache in background)
-	// Note: This is a simplified approach. In production, use io.TeeReader to stream to both client and cache
-	return resp.Body, size, false, nil // Cache miss
+	go func() {
+		defer func() {
+			// Drain any unread data so the tee/client is never blocked by
+			// a stuck or early-exiting cacheBlob (e.g. race-cached blob).
+			io.Copy(io.Discard, pr) //nolint:errcheck
+			pr.Close()
+		}()
+		p.cacheBlob(context.Background(), digest, io.NopCloser(pr), size)
+	}()
+
+	return &proxyBody{Reader: tee, pw: pw, body: resp.Body}, size, false, nil
 }
 
 // cacheManifest stores a manifest in local storage and database
@@ -268,13 +283,26 @@ func LoadConfig(configPath string) (*ProxyConfig, error) {
 	return &config, nil
 }
 
-// calculateDigest calculates the SHA256 digest of content
+// calculateDigest returns the canonical OCI digest (sha256:<hex>) for content.
 func calculateDigest(content []byte) string {
-	// This is a placeholder - implement proper SHA256 calculation
-	// In production: import "crypto/sha256"
-	// hash := sha256.Sum256(content)
-	// return fmt.Sprintf("sha256:%x", hash)
-	return fmt.Sprintf("sha256:%d", len(content)) // Mock
+	sum := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// proxyBody is an io.ReadCloser returned to HTTP handlers for a proxied blob.
+// Reads flow from the upstream response body through a TeeReader that writes
+// to pw; a background goroutine caches the data from pw's pipe partner.
+// Closing proxyBody signals EOF to the pipe (letting the cache goroutine
+// exit cleanly) and closes the original upstream response body.
+type proxyBody struct {
+	io.Reader
+	pw   *io.PipeWriter
+	body io.ReadCloser
+}
+
+func (b *proxyBody) Close() error {
+	b.pw.Close() // signals EOF to the pipe reader, unblocking cacheBlob's io.Copy
+	return b.body.Close()
 }
 
 // ResolveUpstream determines which upstream registry to use for a given repository

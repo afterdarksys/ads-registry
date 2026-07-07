@@ -6,7 +6,11 @@
         "write_timeout": 600000000000,
         "idle_timeout": 120000000000,
         "read_header_timeout": 30000000000,
-        "max_header_bytes": 52428800,
+        "max_header_bytes": 1048576,
+        "max_upload_size": 10737418240,
+        "max_manifest_size": 10485760,
+        "rate_limit_rpm": 10000,
+        "require_configured_db": true,
         "tls": {
             "enabled": true,
             "port": 5006,
@@ -16,7 +20,7 @@
     },
     "database": {
         "driver": "postgres",
-        "dsn": "postgres://ads_registry:ads_registry_password@localhost:5434/ads_registry?sslmode=disable",
+        "dsn": "postgres://ads_registry@localhost:5434/ads_registry?sslmode=require",
         "max_open_conns": 25,
         "max_idle_conns": 5,
         "conn_max_lifetime": 3600000000000
@@ -37,7 +41,7 @@
             "enabled": true,
             "issuer": "https://auth.afterdarksys.com/application/o/ads-registry/",
             "client_id": "ads-registry",
-            "client_secret": "ca2ae983e7d7d4ad45e619a0da7f2079b7ec4e5510e370b0bddc45b6c6758d14",
+            "client_secret": "",
             "redirect_url": "https://registry.afterdarksys.com/oauth2/callback",
             "scopes": ["openid", "profile", "email", "groups"]
         }

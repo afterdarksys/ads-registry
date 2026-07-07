@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // Tenant represents a multi-tenant SaaS tenant
@@ -192,6 +194,12 @@ func (s *TenantService) CreateTenant(ctx context.Context, slug, name, contactEma
 	// Generate schema name
 	schemaName := fmt.Sprintf("tenant_%s", slug)
 
+	// Validate schema name against strict allowlist (defense-in-depth against injection
+	// via tampered DB values; slug hyphens are rejected here intentionally).
+	if matched, _ := regexp.MatchString(`^[a-z_][a-z0-9_]{0,62}$`, schemaName); !matched {
+		return nil, fmt.Errorf("invalid schema name %q derived from slug: must match ^[a-z_][a-z0-9_]{0,62}$", schemaName)
+	}
+
 	// Start transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -318,7 +326,7 @@ func (s *TenantService) DeleteTenant(ctx context.Context, tenantID int, dropSche
 
 	// Optionally drop the schema
 	if dropSchema && schemaName != "public" {
-		_, err = tx.ExecContext(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
+		_, err = tx.ExecContext(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", pq.QuoteIdentifier(schemaName)))
 		if err != nil {
 			return fmt.Errorf("failed to drop tenant schema: %w", err)
 		}

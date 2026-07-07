@@ -85,14 +85,10 @@ func (r *OAuth2Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Generate JWT token for UI session
-	access := []auth.AccessEntry{
-		{
-			Type:    "repository",
-			Name:    "*",
-			Actions: []string{"*"},
-		},
-	}
+	// Generate JWT token for UI session using the user's ACTUAL scopes.
+	// Previously this hardcoded repository:*:* for every user — a privilege
+	// escalation that let any web-UI login act as a full admin.
+	access := auth.ScopesToAccess(user.Scopes)
 
 	token, err := r.tokenService.GenerateToken(user.Username, access)
 	if err != nil {

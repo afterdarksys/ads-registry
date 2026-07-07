@@ -35,6 +35,9 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// maxUploadBytes caps individual blob uploads to prevent disk-exhaustion DoS (10 GiB).
+const maxUploadBytes = 10 << 30
+
 type Router struct {
 	db            db.Store
 	storage       storage.Provider
@@ -879,9 +882,8 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	defer unlock()
 
 	// Limit upload size per chunk
-	maxUploadSize := int64(10 * 1024 * 1024 * 1024) // 10GB
-	if req.ContentLength > maxUploadSize {
-		errMsg := fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadSize)
+	if req.ContentLength > maxUploadBytes {
+		errMsg := fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadBytes)
 		log.Printf("[PATCH_UPLOAD] ERROR too large: fullRepo=%s uuid=%s", fullRepo, uuid)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Registry-Debug-Error", errMsg)
@@ -906,7 +908,7 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Use limited reader to enforce size limit at read time
-	limitedReader := io.LimitReader(req.Body, maxUploadSize)
+	limitedReader := io.LimitReader(req.Body, maxUploadBytes)
 	n, err := io.Copy(appender, limitedReader)
 
 	// Explicitly close the appender to flush any buffered local writers
@@ -1007,8 +1009,8 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			_, err = io.Copy(appender, req.Body)
-			
+			_, err = io.Copy(appender, io.LimitReader(req.Body, maxUploadBytes))
+
 			// Always check close error, as this flushes the buffer to disk
 			closeErr := appender.Close()
 			if err != nil {
@@ -1045,7 +1047,7 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 
 			hasher := sha256.New()
 			multiWriter := io.MultiWriter(appender, hasher)
-			size, err = io.Copy(multiWriter, req.Body)
+			size, err = io.Copy(multiWriter, io.LimitReader(req.Body, maxUploadBytes))
 			
 			// Always check close error, as this flushes the buffer to disk
 			closeErr := appender.Close()

@@ -30,7 +30,12 @@ func (c *LDAPClient) AuthenticateAndFetch(username, password string) ([]string, 
 
 	dialLDAP := func() (*ldap.Conn, error) {
 		if c.config.UseSSL {
-			tlsConfig := &tls.Config{InsecureSkipVerify: c.config.InsecureSkipVerify}
+			if c.config.InsecureSkipVerify {
+				log.Printf("[LDAP] WARNING: TLS certificate verification is DISABLED (InsecureSkipVerify=true). "+
+					"The LDAP connection to %s is vulnerable to man-in-the-middle attacks. "+
+					"Set insecure_skip_verify=false and provide a valid CA certificate in production.", c.config.Server)
+			}
+			tlsConfig := &tls.Config{InsecureSkipVerify: c.config.InsecureSkipVerify} //nolint:gosec // operator opt-in, warned above
 			return ldap.DialTLS("tcp", c.config.Server, tlsConfig)
 		}
 		return ldap.Dial("tcp", c.config.Server)

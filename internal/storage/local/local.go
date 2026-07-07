@@ -21,12 +21,17 @@ func New(rootDir string) (*LocalStore, error) {
 	return &LocalStore{rootDir: rootDir}, nil
 }
 
-func (s *LocalStore) resolvePath(path string) string {
-	return filepath.Join(s.rootDir, path)
+// resolvePath joins the storage root with a client-influenced key while
+// guaranteeing the result cannot escape the root via path traversal (CWE-22).
+func (s *LocalStore) resolvePath(path string) (string, error) {
+	return storage.SafeJoin(s.rootDir, path)
 }
 
 func (s *LocalStore) Writer(ctx context.Context, path string) (io.WriteCloser, error) {
-	fullPath := s.resolvePath(path)
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return nil, err
 	}
@@ -68,7 +73,10 @@ func (w *bufferedFileWriter) Close() error {
 }
 
 func (s *LocalStore) Appender(ctx context.Context, path string) (io.WriteCloser, error) {
-	fullPath := s.resolvePath(path)
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return nil, err
 	}
@@ -87,7 +95,10 @@ func (s *LocalStore) Appender(ctx context.Context, path string) (io.WriteCloser,
 }
 
 func (s *LocalStore) Reader(ctx context.Context, path string, offset int64) (io.ReadCloser, error) {
-	fullPath := s.resolvePath(path)
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -105,8 +116,11 @@ func (s *LocalStore) Reader(ctx context.Context, path string, offset int64) (io.
 }
 
 func (s *LocalStore) Delete(ctx context.Context, path string) error {
-	fullPath := s.resolvePath(path)
-	err := os.Remove(fullPath)
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(fullPath)
 	if os.IsNotExist(err) {
 		return storage.ErrNotFound
 	}
@@ -114,8 +128,14 @@ func (s *LocalStore) Delete(ctx context.Context, path string) error {
 }
 
 func (s *LocalStore) Move(ctx context.Context, source string, target string) error {
-	fullSource := s.resolvePath(source)
-	fullTarget := s.resolvePath(target)
+	fullSource, err := s.resolvePath(source)
+	if err != nil {
+		return err
+	}
+	fullTarget, err := s.resolvePath(target)
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(filepath.Dir(fullTarget), 0755); err != nil {
 		return err
@@ -125,7 +145,10 @@ func (s *LocalStore) Move(ctx context.Context, source string, target string) err
 }
 
 func (s *LocalStore) Stat(ctx context.Context, path string) (int64, error) {
-	fullPath := s.resolvePath(path)
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return 0, err
+	}
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {

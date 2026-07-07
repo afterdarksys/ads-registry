@@ -35,3 +35,7 @@ Thumbs.db
 ads-registry-test
 ads-registry-linux
 ads-registry-linux-cgo
+ads-registry-linux-new
+
+# Local-only handoff note (references leaked secrets by name — do not publish)
+NOTE_FOR_OPUS.md

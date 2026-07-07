@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
+
+// scriptExecTimeout is the maximum wall-clock time a Starlark script may run.
+const scriptExecTimeout = 30 * time.Second
 
 // Engine is the Starlark scripting engine
 type Engine struct {
@@ -64,6 +68,12 @@ func (e *Engine) ExecuteScript(ctx context.Context, script string, filename stri
 		},
 	}
 
+	// Cancel the thread after scriptExecTimeout to prevent runaway scripts.
+	timer := time.AfterFunc(scriptExecTimeout, func() {
+		thread.Cancel("execution timeout exceeded")
+	})
+	defer timer.Stop()
+
 	// Execute the script
 	globals, err := starlark.ExecFile(thread, filename, script, e.predeclared)
 	if err != nil {
@@ -81,6 +91,12 @@ func (e *Engine) ExecuteFile(ctx context.Context, path string) (starlark.StringD
 			fmt.Println(msg)
 		},
 	}
+
+	// Cancel the thread after scriptExecTimeout to prevent runaway scripts.
+	timer := time.AfterFunc(scriptExecTimeout, func() {
+		thread.Cancel("execution timeout exceeded")
+	})
+	defer timer.Stop()
 
 	globals, err := starlark.ExecFile(thread, path, nil, e.predeclared)
 	if err != nil {

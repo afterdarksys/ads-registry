@@ -18,6 +18,9 @@ import (
 	"github.com/ryan/ads-registry/internal/storage"
 )
 
+// maxUploadBytes caps package file uploads to prevent disk-exhaustion DoS (10 GiB).
+const maxUploadBytes = 10 << 30
+
 type Handler struct {
 	db      db.Store
 	storage storage.Provider
@@ -157,9 +160,9 @@ func (h *Handler) uploadPackage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Read everything into memory to leverage archive/zip efficiently, 
+	// Read everything into memory to leverage archive/zip efficiently,
 	// assuming normal composer zips are relatively tiny.
-	zipData, err := io.ReadAll(file)
+	zipData, err := io.ReadAll(io.LimitReader(file, maxUploadBytes))
 	if err != nil {
 		http.Error(w, "Error reading upload", http.StatusInternalServerError)
 		return

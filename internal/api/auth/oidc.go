@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -28,6 +30,7 @@ type OIDCHandler struct {
 	tokenService *registryAuth.TokenService
 	oauth2Config *oauth2.Config
 	verifier     *oidc.IDTokenVerifier
+	statesMu     sync.Mutex            // guards states — accessed from concurrent HTTP handlers
 	states       map[string]stateEntry // state -> {expiry, nonce}
 }
 
@@ -91,13 +94,14 @@ func (h *OIDCHandler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store state with expiry (5 minutes) and nonce
+	h.statesMu.Lock()
 	h.states[state] = stateEntry{
 		expiry: time.Now().Add(5 * time.Minute),
 		nonce:  nonce,
 	}
-
-	// Clean up expired states
-	h.cleanupExpiredStates()
+	// Clean up expired states while holding the lock
+	h.cleanupExpiredStatesLocked()
+	h.statesMu.Unlock()
 
 	// Redirect to provider with nonce included in auth URL
 	authURL := h.oauth2Config.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce))
@@ -114,13 +118,17 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.statesMu.Lock()
 	entry, ok := h.states[state]
+	if ok {
+		delete(h.states, state)
+	}
+	h.statesMu.Unlock()
 	if !ok || time.Now().After(entry.expiry) {
 		http.Error(w, "Invalid or expired state", http.StatusBadRequest)
 		return
 	}
 	storedNonce := entry.nonce
-	delete(h.states, state)
 
 	// Exchange code for token
 	code := r.URL.Query().Get("code")
@@ -163,8 +171,8 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify nonce to prevent replay attacks
-	if claims.Nonce != storedNonce {
+	// Verify nonce to prevent replay attacks (constant-time to avoid leaking it)
+	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(storedNonce)) != 1 {
 		http.Error(w, "nonce mismatch", http.StatusBadRequest)
 		return
 	}
@@ -214,14 +222,10 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate registry JWT token
-	access := []registryAuth.AccessEntry{
-		{
-			Type:    "repository",
-			Name:    "*",
-			Actions: []string{"*"},
-		},
-	}
+	// Generate registry JWT token from the user's ACTUAL scopes (derived from
+	// their IdP groups above). Previously hardcoded repository:*:*, which made
+	// every SSO login a full registry admin regardless of group membership.
+	access := registryAuth.ScopesToAccess(user.Scopes)
 
 	token, err := h.tokenService.GenerateToken(user.Username, access)
 	if err != nil {
@@ -241,7 +245,8 @@ func (h *OIDCHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
-func (h *OIDCHandler) cleanupExpiredStates() {
+// cleanupExpiredStatesLocked removes expired entries. Caller must hold statesMu.
+func (h *OIDCHandler) cleanupExpiredStatesLocked() {
 	now := time.Now()
 	for state, entry := range h.states {
 		if now.After(entry.expiry) {

@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -178,7 +180,7 @@ func (tdb *TenantScopedDB) execInSchema(ctx context.Context, query string, args 
 	defer tx.Rollback()
 
 	// Set search path to tenant schema
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", tdb.tenant.SchemaName))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", pq.QuoteIdentifier(tdb.tenant.SchemaName)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to set search path: %w", err)
 	}
@@ -210,7 +212,7 @@ func (tdb *TenantScopedDB) queryInSchema(ctx context.Context, query string, args
 	// Don't close conn here - caller must close rows which will release the connection
 
 	// Set search path for this connection
-	_, err = conn.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", tdb.tenant.SchemaName))
+	_, err = conn.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", pq.QuoteIdentifier(tdb.tenant.SchemaName)))
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set search path: %w", err)
@@ -237,7 +239,7 @@ func (tdb *TenantScopedDB) queryRowInSchema(ctx context.Context, query string, a
 	defer conn.Close()
 
 	// Set search path for this connection
-	_, err = conn.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", tdb.tenant.SchemaName))
+	_, err = conn.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", pq.QuoteIdentifier(tdb.tenant.SchemaName)))
 	if err != nil {
 		// Return a row that will error when scanned
 		return &sql.Row{}
@@ -255,7 +257,7 @@ func (tdb *TenantScopedDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*T
 	}
 
 	// Set search path
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", tdb.tenant.SchemaName))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", pq.QuoteIdentifier(tdb.tenant.SchemaName)))
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("failed to set search path: %w", err)

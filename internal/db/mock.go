@@ -245,6 +245,22 @@ func (m *MockStore) CountRecentFailedLogins(ctx context.Context, username string
 	return 0, nil
 }
 
+func (m *MockStore) DeleteArtifact(ctx context.Context, format, namespace, packageName, version string) error {
+	return nil
+}
+
+func (m *MockStore) DeleteAllArtifactVersions(ctx context.Context, format, namespace, packageName string) error {
+	return nil
+}
+
+func (m *MockStore) GetPackageNames(ctx context.Context, format, namespace string) ([]string, error) {
+	return []string{}, nil
+}
+
+func (m *MockStore) GetArtifactStatistics(ctx context.Context, format, namespace string) (*ArtifactStatistics, error) {
+	return &ArtifactStatistics{}, nil
+}
+
 func (m *MockStore) WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }

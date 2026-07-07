@@ -7,19 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // provisionTenantSchema provisions a new tenant schema with all necessary tables
 // This creates a complete isolated schema for a tenant based on migrations 013 and 014
 func provisionTenantSchema(ctx context.Context, tx *sql.Tx, schemaName string) error {
 	// Create the schema
-	_, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schemaName))
+	_, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", pq.QuoteIdentifier(schemaName)))
 	if err != nil {
 		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
 	}
 
 	// Set search path to new schema for subsequent operations
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", schemaName))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s, public", pq.QuoteIdentifier(schemaName)))
 	if err != nil {
 		return fmt.Errorf("failed to set search path: %w", err)
 	}

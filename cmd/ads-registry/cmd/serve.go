@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -97,6 +98,20 @@ func configureHTTPTransport() {
 		// Performance
 		WriteBufferSize: 256 * 1024, // 256KB write buffer
 		ReadBufferSize:  256 * 1024, // 256KB read buffer
+	}
+}
+
+// minTLSVersion maps a config string ("1.2", "1.3", …) to a crypto/tls
+// constant, defaulting to TLS 1.2 for any unrecognized or empty value.
+func minTLSVersion(v string) uint16 {
+	switch strings.TrimSpace(v) {
+	case "1.3":
+		return tls.VersionTLS13
+	case "1.0", "1.1":
+		// Explicitly refuse to honor legacy versions — floor at 1.2.
+		return tls.VersionTLS12
+	default:
+		return tls.VersionTLS12
 	}
 }
 
@@ -213,11 +228,19 @@ func runServer() {
 	logger.Info("ADS Container Registry starting up")
 
 	if cfg.Server.DeveloperMode {
-		env := os.Getenv("REGISTRY_ENV")
-		if env == "production" || env == "prod" {
-			log.Fatalf("FATAL: developer_mode is enabled but REGISTRY_ENV=%s. Refusing to start.", env)
+		// Fail closed: developer mode disables ALL authentication and exposes
+		// pprof, so it must be opted into explicitly and can never run in an
+		// environment that is not unambiguously non-production. An unset or
+		// unrecognized REGISTRY_ENV is treated as production.
+		env := strings.ToLower(strings.TrimSpace(os.Getenv("REGISTRY_ENV")))
+		nonProd := map[string]bool{"dev": true, "development": true, "local": true, "test": true}
+		if !strings.EqualFold(os.Getenv("REGISTRY_ALLOW_DEV_MODE"), "true") {
+			log.Fatalf("FATAL: developer_mode is enabled in config but REGISTRY_ALLOW_DEV_MODE is not set to 'true'. Refusing to start with auth disabled.")
 		}
-		logger.Warning("DEVELOPER MODE: auth bypassed — do NOT use in production")
+		if !nonProd[env] {
+			log.Fatalf("FATAL: developer_mode requires REGISTRY_ENV to be one of dev/development/local/test (got %q). Refusing to start.", env)
+		}
+		logger.Warning("DEVELOPER MODE: auth bypassed, pprof exposed — do NOT use in production")
 	}
 
 	if cfg.Logging.Syslog.Enabled {
@@ -250,6 +273,12 @@ func runServer() {
 	case "postgres", "pgsqllite":
 		store, err = postgres.New(cfg.Database)
 		if err != nil {
+			if cfg.Server.RequireConfiguredDB {
+				// Fail closed: do not silently downgrade production to an
+				// ephemeral SQLite file that is lost on restart.
+				logger.Error("PostgreSQL connection failed and require_configured_db is set", err)
+				log.Fatalf("FATAL: could not connect to configured PostgreSQL and require_configured_db=true: %v", err)
+			}
 			logger.Error("Failed to initialize PostgreSQL connection, falling back to SQLite", err)
 			cfg.Database.Driver = "sqlite3"
 			cfg.Database.DSN = "data/registry.db?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&cache=shared"
@@ -428,8 +457,12 @@ func runServer() {
 	r.Use(compatMiddleware.CompatibilityMiddleware)
 	// 6. Recovery (catch panics)
 	r.Use(middleware.Recoverer)
-	// 7. Rate limiting (increased to 10000 for OCI migration)
-	r.Use(httprate.LimitByIP(10000, 1*time.Minute))
+	// 7. Rate limiting (per-IP, configurable via server.rate_limit_rpm)
+	rateLimitRPM := cfg.Server.RateLimitRPM
+	if rateLimitRPM <= 0 {
+		rateLimitRPM = 10000
+	}
+	r.Use(httprate.LimitByIP(rateLimitRPM, 1*time.Minute))
 
 	// Developer Mode Overrides
 	if cfg.Server.DeveloperMode {
@@ -690,6 +723,11 @@ func runServer() {
 			IdleTimeout:       cfg.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+			// Enforce a minimum TLS version (default 1.2). Previously unset,
+			// which let Go negotiate down and accept legacy protocol versions.
+			TLSConfig: &tls.Config{
+				MinVersion: minTLSVersion(cfg.Compatibility.TLSCompatibility.MinTLSVersion),
+			},
 			TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
 			// Apply same TCP optimizations to TLS connections
 			ConnContext: func(ctx context.Context, c net.Conn) context.Context {

@@ -23,6 +23,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const maxScriptBytes = 5 << 20 // 5 MiB
+
 // actorFromReq extracts the authenticated actor and client IP from the request.
 func actorFromReq(r *http.Request) (actor, ip string) {
 	if claims, ok := r.Context().Value(auth.UserContext).(auth.Claims); ok {
@@ -258,6 +260,13 @@ func (r *Router) createUser(w http.ResponseWriter, req *http.Request) {
 	}
 	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(payload.Password) < 8 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "password must be at least 8 characters"})
 		return
 	}
 
@@ -661,7 +670,7 @@ func (r *Router) putScript(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	content, err := io.ReadAll(req.Body)
+	content, err := io.ReadAll(io.LimitReader(req.Body, maxScriptBytes))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -753,7 +762,12 @@ func (r *Router) deleteScript(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) listAccessTokens(w http.ResponseWriter, req *http.Request) {
 	// Get user from auth context
-	username := req.Context().Value("username").(string)
+	claims, ok := req.Context().Value(auth.UserContext).(auth.Claims)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	username := claims.Subject
 	user, err := r.db.GetUserByUsername(req.Context(), username)
 	if err != nil {
 		http.Error(w, "User not found", http.StatusNotFound)
@@ -801,7 +815,12 @@ func (r *Router) createAccessToken(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Get user from auth context
-	username := req.Context().Value("username").(string)
+	claims, ok := req.Context().Value(auth.UserContext).(auth.Claims)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	username := claims.Subject
 	user, err := r.db.GetUserByUsername(req.Context(), username)
 	if err != nil {
 		http.Error(w, "User not found", http.StatusNotFound)
@@ -869,7 +888,12 @@ func (r *Router) deleteAccessToken(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Get user from auth context
-	username := req.Context().Value("username").(string)
+	claims, ok := req.Context().Value(auth.UserContext).(auth.Claims)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	username := claims.Subject
 	user, err := r.db.GetUserByUsername(req.Context(), username)
 	if err != nil {
 		http.Error(w, "User not found", http.StatusNotFound)

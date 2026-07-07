@@ -17,6 +17,13 @@ import (
 	"github.com/ryan/ads-registry/internal/storage"
 )
 
+const (
+	// maxUploadBytes caps package file uploads to prevent disk-exhaustion DoS (10 GiB).
+	maxUploadBytes = 10 << 30
+	// maxMetadataBytes caps small metadata files such as .mod to prevent memory-exhaustion DoS (32 MiB).
+	maxMetadataBytes = 32 << 20
+)
+
 type Handler struct {
 	db      db.Store
 	storage storage.Provider
@@ -166,8 +173,8 @@ func (h *Handler) uploadModule(w http.ResponseWriter, r *http.Request) {
 	}
 	defer zipFile.Close()
 
-	// Read mod bytes
-	modData, _ := io.ReadAll(modFile)
+	// Read mod bytes — .mod files are small metadata; cap at maxMetadataBytes.
+	modData, _ := io.ReadAll(io.LimitReader(modFile, maxMetadataBytes))
 
 	// Save artifact in DB
 	artifact := &db.UniversalArtifact{

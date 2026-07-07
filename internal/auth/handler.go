@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -168,14 +169,27 @@ func (h *Handler) tokenHandler(w http.ResponseWriter, req *http.Request) {
 		if !ldapAuthSuccess {
 			dbUser, err = h.db.AuthenticateUser(req.Context(), user, pass)
 		if err != nil {
-			// Bootstrap fallback: Allow admin/admin if no admin user exists yet
-			if user == "admin" && pass == "admin" {
+			// Bootstrap fallback: allow admin/admin ONLY when explicitly opted in
+			// via REGISTRY_ALLOW_BOOTSTRAP_ADMIN=true AND no admin user exists yet.
+			// Without the opt-in this path is disabled entirely, so deleting the
+			// admin row can no longer re-open an unauthenticated wildcard backdoor.
+			bootstrapAllowed := strings.EqualFold(os.Getenv("REGISTRY_ALLOW_BOOTSTRAP_ADMIN"), "true")
+			if bootstrapAllowed && user == "admin" && pass == "admin" {
 				// Check if admin user exists in the database
 				if testUser, _ := h.db.GetUserByUsername(req.Context(), "admin"); testUser == nil {
-					// No admin user exists - create one and allow bootstrap login
+					// No admin user exists - create one and allow bootstrap login.
+					// Fail closed if the write fails: do NOT hand out a JWT for a
+					// user that was never persisted.
 					log.Printf("WARNING: Bootstrap login used (admin/admin). Creating admin user — change this password ASAP!")
-					if hashed, hashErr := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost); hashErr == nil {
-						_ = h.db.CreateUser(req.Context(), "admin", string(hashed), []string{"*"})
+					hashed, hashErr := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+					if hashErr != nil {
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+						return
+					}
+					if err := h.db.CreateUser(req.Context(), "admin", string(hashed), []string{"*"}); err != nil {
+						log.Printf("[AUTH] Bootstrap admin creation failed: %v", err)
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+						return
 					}
 					dbUser = &db.User{Username: "admin", Scopes: []string{"*"}}
 				} else {
@@ -301,8 +315,18 @@ func (h *Handler) refreshHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Generate a new token with the same access grants
-	newToken, err := h.tokenService.GenerateToken(claims.Subject, claims.Access)
+	// Re-validate the principal against the current DB state. Refresh must not
+	// perpetuate stale privileges: if the user was deleted or had scopes
+	// revoked, the new token reflects that (or is refused) rather than
+	// re-minting the old grants forever.
+	dbUser, err := h.db.GetUserByUsername(req.Context(), claims.Subject)
+	if err != nil || dbUser == nil {
+		http.Error(w, "User no longer exists", http.StatusUnauthorized)
+		return
+	}
+
+	// Generate a new token from the user's CURRENT scopes, not the old claims.
+	newToken, err := h.tokenService.GenerateToken(claims.Subject, ScopesToAccess(dbUser.Scopes))
 	if err != nil {
 		http.Error(w, "Failed to generate new token", http.StatusInternalServerError)
 		return

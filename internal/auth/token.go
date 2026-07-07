@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -79,6 +80,49 @@ func NewTokenService(cfg config.AuthConfig) (*TokenService, error) {
 		publicKey:  publicKey,
 		Expiration: cfg.TokenExpiration,
 	}, nil
+}
+
+// ScopesToAccess converts a user's stored scope strings into JWT access entries.
+//
+// Scope grammar:
+//   - "*"                              → full admin (repository:*:*)
+//   - "repository:<name>:<a1>,<a2>"    → typed access entry
+//   - "repository:<name>"              → defaults to pull only
+//
+// This is the single source of truth for turning a principal's persisted scopes
+// into token claims; both the Docker token endpoint and the web/OIDC login paths
+// MUST use it so a UI login can never grant more than the user actually holds.
+func ScopesToAccess(scopes []string) []AccessEntry {
+	access := make([]AccessEntry, 0, len(scopes))
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if s == "*" {
+			return []AccessEntry{{Type: "repository", Name: "*", Actions: []string{"*"}}}
+		}
+		parts := strings.SplitN(s, ":", 3)
+		if len(parts) < 2 {
+			// Malformed scope — skip rather than grant anything.
+			continue
+		}
+		entry := AccessEntry{Type: parts[0], Name: parts[1], Actions: []string{"pull"}}
+		if len(parts) == 3 && parts[2] != "" {
+			acts := strings.Split(parts[2], ",")
+			cleaned := acts[:0]
+			for _, a := range acts {
+				if a = strings.TrimSpace(a); a != "" {
+					cleaned = append(cleaned, a)
+				}
+			}
+			if len(cleaned) > 0 {
+				entry.Actions = cleaned
+			}
+		}
+		access = append(access, entry)
+	}
+	return access
 }
 
 // GenerateToken creates a signed JWT for the given subject and granted scopes.
