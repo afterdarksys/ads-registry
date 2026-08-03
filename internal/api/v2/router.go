@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
+	godigest "github.com/opencontainers/go-digest"
 	"github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/config"
@@ -56,17 +57,39 @@ type Router struct {
 	// blobGroup deduplicates concurrent finalizations of the same blob digest,
 	// preventing race conditions when multiple clients push identical layers.
 	blobGroup singleflight.Group
-	// uploadMu serializes concurrent PATCH requests for the same upload UUID,
-	// preventing data corruption when two clients append to the same temp file.
-	uploadMu sync.Map
+	// uploadLocks serializes all mutations of an upload session, including finalization.
+	uploadLocksMu sync.Mutex
+	uploadLocks   map[string]*uploadLock
 }
 
-// lockUpload acquires a per-upload mutex for the given UUID and returns an
-// unlock function. Callers must defer the returned function.
-func (r *Router) lockUpload(uuid string) func() {
-	mu, _ := r.uploadMu.LoadOrStore(uuid, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	return func() { mu.(*sync.Mutex).Unlock() }
+type uploadLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockUpload acquires a reference-counted per-repository upload lock. A waiter
+// takes its reference before blocking, so the lock cannot be removed and
+// replaced while another request is still queued on it.
+func (r *Router) lockUpload(key string) func() {
+	r.uploadLocksMu.Lock()
+	entry := r.uploadLocks[key]
+	if entry == nil {
+		entry = &uploadLock{}
+		r.uploadLocks[key] = entry
+	}
+	entry.refs++
+	r.uploadLocksMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		r.uploadLocksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(r.uploadLocks, key)
+		}
+		r.uploadLocksMu.Unlock()
+	}
 }
 
 func (r *Router) SetWebhookDispatcher(wd *webhooks.Dispatcher) {
@@ -89,9 +112,9 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 	}
 
 	return &Router{
-		db:            dbStore,
-		storage:       storageProvider,
-		tokenTs:       ts,
+		db:      dbStore,
+		storage: storageProvider,
+		tokenTs: ts,
 		authMid: auth.NewMiddleware(ts, devMode, func(ctx context.Context, u, p string) ([]string, error) {
 			user, err := dbStore.AuthenticateUser(ctx, u, p)
 			if err != nil {
@@ -107,6 +130,7 @@ func NewRouter(dbStore db.Store, storageProvider storage.Provider, ts *auth.Toke
 		developerMode: devMode,
 		ldapClient:    ldapClient,
 		vulnGate:      vulnGate,
+		uploadLocks:   make(map[string]*uploadLock),
 	}
 }
 
@@ -339,7 +363,108 @@ func getRepoContext(req *http.Request) (fullRepo string, quotaNs string) {
 }
 
 func getPath(fullRepo, digest string) string {
-	return filepath.Join(fullRepo, digest)
+	return storage.BlobPath(fullRepo, digest)
+}
+
+type blobRange struct {
+	start int64
+	end   int64
+}
+
+type manifestDescriptor struct {
+	Digest string `json:"digest"`
+}
+
+type manifestReferences struct {
+	Config    *manifestDescriptor  `json:"config"`
+	Layers    []manifestDescriptor `json:"layers"`
+	Blobs     []manifestDescriptor `json:"blobs"`
+	Manifests []manifestDescriptor `json:"manifests"`
+}
+
+type missingManifestReferenceError struct {
+	digest string
+}
+
+func (e *missingManifestReferenceError) Error() string {
+	return "manifest references missing content: " + e.digest
+}
+
+func (r *Router) validateManifestReferences(ctx context.Context, repository string, payload []byte) error {
+	var refs manifestReferences
+	if err := json.Unmarshal(payload, &refs); err != nil {
+		return err
+	}
+
+	blobs := append([]manifestDescriptor(nil), refs.Layers...)
+	blobs = append(blobs, refs.Blobs...)
+	if refs.Config != nil {
+		blobs = append(blobs, *refs.Config)
+	}
+	for _, descriptor := range blobs {
+		parsed, err := godigest.Parse(descriptor.Digest)
+		if err != nil {
+			return fmt.Errorf("invalid referenced blob digest %q: %w", descriptor.Digest, err)
+		}
+		if _, err := r.storage.Stat(ctx, storage.BlobPath(repository, parsed.String())); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return &missingManifestReferenceError{digest: parsed.String()}
+			}
+			return err
+		}
+	}
+
+	for _, descriptor := range refs.Manifests {
+		parsed, err := godigest.Parse(descriptor.Digest)
+		if err != nil {
+			return fmt.Errorf("invalid referenced manifest digest %q: %w", descriptor.Digest, err)
+		}
+		if _, _, _, err := r.db.GetManifest(ctx, repository, parsed.String()); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				return &missingManifestReferenceError{digest: parsed.String()}
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func parseBlobRange(header string, size int64) (blobRange, error) {
+	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") || size <= 0 {
+		return blobRange{}, fmt.Errorf("invalid range")
+	}
+	spec := strings.TrimPrefix(header, "bytes=")
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return blobRange{}, fmt.Errorf("invalid range")
+	}
+
+	if parts[0] == "" {
+		suffix, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || suffix <= 0 {
+			return blobRange{}, fmt.Errorf("invalid suffix range")
+		}
+		if suffix > size {
+			suffix = size
+		}
+		return blobRange{start: size - suffix, end: size - 1}, nil
+	}
+
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= size {
+		return blobRange{}, fmt.Errorf("range start outside blob")
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			return blobRange{}, fmt.Errorf("invalid range end")
+		}
+		if end >= size {
+			end = size - 1
+		}
+	}
+	return blobRange{start: start, end: end}, nil
 }
 
 func (r *Router) getCatalog(w http.ResponseWriter, req *http.Request) {
@@ -529,9 +654,14 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 	}
 
 	mediaType := req.Header.Get("Content-Type")
-	limitedReader := io.LimitReader(req.Body, maxManifestSize)
-	payload, err := io.ReadAll(limitedReader)
+	limitedBody := http.MaxBytesReader(w, req.Body, maxManifestSize)
+	payload, err := io.ReadAll(limitedBody)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "manifest exceeds maximum size", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -564,6 +694,26 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if err := r.validateManifestReferences(req.Context(), fullRepo, payload); err != nil {
+		var missing *missingManifestReferenceError
+		w.Header().Set("Content-Type", "application/json")
+		if errors.As(err, &missing) {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse{Errors: []ErrorDetail{{
+				Code:    "MANIFEST_BLOB_UNKNOWN",
+				Message: "blob unknown to registry",
+				Detail:  map[string]string{"digest": missing.digest},
+			}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Errors: []ErrorDetail{{
+			Code:    "MANIFEST_INVALID",
+			Message: err.Error(),
+		}}})
+		return
+	}
+
 	// Enforce Quota (use namespace for quota checking)
 	quota, err := r.db.CheckQuota(req.Context(), quotaNs)
 	if err != nil {
@@ -593,7 +743,9 @@ func (r *Router) putManifest(w http.ResponseWriter, req *http.Request) {
 			return err
 		}
 		if quota != nil {
-			r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(payload)))
+			if err := r.db.UpdateQuotaUsage(ctx, quotaNs, int64(len(payload))); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -699,40 +851,44 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Normal local registry behavior
-	size, err := r.db.GetBlobSize(req.Context(), digest)
-	if err == db.ErrNotFound {
+	// Blob availability is repository-local. The global DB row is metadata and
+	// must never make HEAD claim that a missing repository object exists.
+	path := getPath(fullRepo, digest)
+	size, err := r.storage.Stat(req.Context(), path)
+	if errors.Is(err, storage.ErrNotFound) {
 		http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown"}]}`, http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Docker-Content-Digest", digest)
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	var requestedRange *blobRange
+	if rangeHeader := req.Header.Get("Range"); req.Method == http.MethodGet && rangeHeader != "" {
+		parsed, rangeErr := parseBlobRange(rangeHeader, size)
+		if rangeErr != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		requestedRange = &parsed
+		length := parsed.end - parsed.start + 1
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", parsed.start, parsed.end, size))
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
 
 	if req.Method == "GET" {
-		path := getPath(fullRepo, digest)
-		// Handle Range header for partial blob downloads
-		if rangeHeader := req.Header.Get("Range"); rangeHeader != "" {
-			// Expected format: bytes=start-
-			var start int64
-			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err == nil && start >= 0 {
-				reader, err := r.storage.Reader(req.Context(), path, start)
-				if err != nil {
-					if errors.Is(err, storage.ErrNotFound) {
-						http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown to storage"}]}`, http.StatusNotFound)
-					} else {
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-					}
-					return
-				}
-				defer reader.Close()
-				w.WriteHeader(http.StatusPartialContent)
-				io.Copy(w, reader)
-				return
-			}
+		offset := int64(0)
+		if requestedRange != nil {
+			offset = requestedRange.start
 		}
-		// No Range header – serve full blob
-		reader, err := r.storage.Reader(req.Context(), path, 0)
+		reader, err := r.storage.Reader(req.Context(), path, offset)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown to storage"}]}`, http.StatusNotFound)
@@ -742,7 +898,16 @@ func (r *Router) getBlob(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		defer reader.Close()
-		io.Copy(w, reader)
+		if requestedRange != nil {
+			w.WriteHeader(http.StatusPartialContent)
+			if _, err := io.CopyN(w, reader, requestedRange.end-requestedRange.start+1); err != nil {
+				log.Printf("[GET_BLOB] partial response failed: repo=%s digest=%s err=%v", fullRepo, digest, err)
+			}
+			return
+		}
+		if _, err := io.Copy(w, reader); err != nil {
+			log.Printf("[GET_BLOB] response failed: repo=%s digest=%s err=%v", fullRepo, digest, err)
+		}
 	}
 }
 
@@ -765,11 +930,28 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 
 	if mountDigest != "" && fromRepo != "" {
 		log.Printf("[START_UPLOAD] Cross-repo mount requested: fullRepo=%s fromRepo=%s digest=%s", fullRepo, fromRepo, mountDigest)
+		parsedMount, parseErr := godigest.Parse(mountDigest)
+		if parseErr != nil || parsedMount.Algorithm() != godigest.SHA256 {
+			http.Error(w, "invalid or unsupported mount digest", http.StatusBadRequest)
+			return
+		}
+		mountDigest = parsedMount.String()
 		fromPath := getPath(fromRepo, mountDigest)
 		size, err := r.storage.Stat(req.Context(), fromPath)
 
 		// If blob exists in the 'from' repository, we can mount/copy it
 		if err == nil {
+			targetPath := getPath(fullRepo, mountDigest)
+			if _, targetErr := r.storage.Stat(req.Context(), targetPath); targetErr == nil {
+				w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, mountDigest))
+				w.Header().Set("Docker-Content-Digest", mountDigest)
+				w.WriteHeader(http.StatusCreated)
+				return
+			} else if !errors.Is(targetErr, storage.ErrNotFound) {
+				http.Error(w, targetErr.Error(), http.StatusInternalServerError)
+				return
+			}
+
 			// 1. Quota check against the target namespace
 			quota, err := r.db.CheckQuota(req.Context(), quotaNs)
 			if err != nil {
@@ -788,18 +970,26 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 			// 2. Perform copy
 			reader, err := r.storage.Reader(req.Context(), fromPath, 0)
 			if err == nil {
-				targetPath := getPath(fullRepo, mountDigest)
 				writer, err := r.storage.Writer(req.Context(), targetPath)
 				if err == nil {
 					_, copyErr := io.Copy(writer, reader)
-					writer.Close()
-					reader.Close()
+					writerCloseErr := writer.Close()
+					readerCloseErr := reader.Close()
 
-					if copyErr == nil {
+					if copyErr == nil && writerCloseErr == nil && readerCloseErr == nil {
 						// 3. Mount successful: Update database and return 201 Created
-						r.db.PutBlob(req.Context(), mountDigest, size, "application/octet-stream")
-						if quota != nil {
-							r.db.UpdateQuotaUsage(req.Context(), quotaNs, size)
+						if err := r.db.WithTx(req.Context(), func(ctx context.Context) error {
+							if err := r.db.PutBlob(ctx, mountDigest, size, "application/octet-stream"); err != nil {
+								return err
+							}
+							if quota != nil {
+								return r.db.UpdateQuotaUsage(ctx, quotaNs, size)
+							}
+							return nil
+						}); err != nil {
+							r.storage.Delete(req.Context(), targetPath)
+							http.Error(w, err.Error(), http.StatusInternalServerError)
+							return
 						}
 
 						w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, mountDigest))
@@ -809,6 +999,14 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 					}
 					// Cleanup partial copies if io.Copy fails
 					r.storage.Delete(req.Context(), targetPath)
+					if copyErr != nil {
+						http.Error(w, copyErr.Error(), http.StatusInternalServerError)
+					} else if writerCloseErr != nil {
+						http.Error(w, writerCloseErr.Error(), http.StatusInternalServerError)
+					} else {
+						http.Error(w, readerCloseErr.Error(), http.StatusInternalServerError)
+					}
+					return
 				} else {
 					reader.Close()
 				}
@@ -829,7 +1027,10 @@ func (r *Router) startUpload(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", fullRepo, uploadUUID))
 	w.Header().Set("Range", "0-0")
@@ -878,11 +1079,23 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 
 	// Serialize concurrent PATCH requests for the same UUID to prevent
 	// data corruption from simultaneous appends to the same temp file.
-	unlock := r.lockUpload(uuid)
+	unlock := r.lockUpload(fullRepo + "\x00" + uuid)
 	defer unlock()
 
-	// Limit upload size per chunk
-	if req.ContentLength > maxUploadBytes {
+	tempPath := storage.UploadPath(fullRepo, uuid)
+	existingSize, err := r.storage.Stat(req.Context(), tempPath)
+	if errors.Is(err, storage.ErrNotFound) {
+		http.Error(w, "upload not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	remaining := maxUploadBytes - existingSize
+
+	// Enforce the limit against the accumulated upload, not merely this chunk.
+	if remaining < 0 || req.ContentLength > remaining {
 		errMsg := fmt.Sprintf("upload chunk exceeds maximum size of %d bytes", maxUploadBytes)
 		log.Printf("[PATCH_UPLOAD] ERROR too large: fullRepo=%s uuid=%s", fullRepo, uuid)
 		w.Header().Set("Content-Type", "application/json")
@@ -899,7 +1112,6 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	tempPath := getPath(fullRepo, "uploads/"+uuid)
 	appender, err := r.storage.Appender(req.Context(), tempPath)
 	if err != nil {
 		log.Printf("[PATCH_UPLOAD] ERROR appender open: fullRepo=%s uuid=%s err=%v", fullRepo, uuid, err)
@@ -907,9 +1119,11 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Use limited reader to enforce size limit at read time
-	limitedReader := io.LimitReader(req.Body, maxUploadBytes)
-	n, err := io.Copy(appender, limitedReader)
+	// MaxBytesReader reports overflow instead of silently truncating an
+	// unknown-length request body. An overflow invalidates the upload because
+	// part of the oversized chunk may already have reached storage.
+	limitedBody := http.MaxBytesReader(w, req.Body, remaining)
+	n, err := io.Copy(appender, limitedBody)
 
 	// Explicitly close the appender to flush any buffered local writers
 	// before we stat the file size!
@@ -917,6 +1131,12 @@ func (r *Router) patchUpload(w http.ResponseWriter, req *http.Request) {
 
 	if err != nil {
 		log.Printf("[PATCH_UPLOAD] ERROR copy: fullRepo=%s uuid=%s written=%d err=%v", fullRepo, uuid, n, err)
+		r.storage.Delete(req.Context(), tempPath)
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "upload exceeds maximum size", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -957,128 +1177,95 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "digest query param required", http.StatusBadRequest)
 		return
 	}
-
-	tempPath := getPath(fullRepo, "uploads/"+uuid)
-	finalPath := getPath(fullRepo, digest)
-
-	// Idempotency check: Does this blob already exist?
-	// DB is global (no repo column), but files are stored per-repo. Check both:
-	// if DB says yes but the file is missing at this repo's path, re-upload.
-	exists, err := r.db.BlobExists(req.Context(), digest)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	parsedDigest, err := godigest.Parse(digest)
+	if err != nil || parsedDigest.Algorithm() != godigest.SHA256 {
+		http.Error(w, "invalid or unsupported digest", http.StatusBadRequest)
 		return
 	}
-	if exists {
-		if _, statErr := r.storage.Stat(req.Context(), finalPath); statErr != nil {
-			exists = false
-			log.Printf("[PUT_UPLOAD] blob %s in DB but missing on disk at %s — re-uploading", digest, finalPath)
+
+	unlock := r.lockUpload(fullRepo + "\x00" + uuid)
+	defer unlock()
+
+	tempPath := storage.UploadPath(fullRepo, uuid)
+	finalPath := getPath(fullRepo, digest)
+
+	// Repository-local storage, rather than global metadata, is authoritative.
+	if existingSize, statErr := r.storage.Stat(req.Context(), finalPath); statErr == nil {
+		if err := r.db.PutBlob(req.Context(), digest, existingSize, "application/octet-stream"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-	}
-	if exists {
 		// Clean up partial upload just in case
 		r.storage.Delete(req.Context(), tempPath)
 		w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, digest))
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.WriteHeader(http.StatusCreated)
 		return
+	} else if !errors.Is(statErr, storage.ErrNotFound) {
+		http.Error(w, statErr.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	var size int64
-	var actualDigest string
-
-	// Check if this is a monolithic upload (temp file doesn't exist yet or is empty)
-	// or chunked upload (temp file was created and populated by prior PATCH requests)
-	tempFileExists := true
-	if size, err := r.storage.Stat(req.Context(), tempPath); err != nil {
-		if err == storage.ErrNotFound {
-			tempFileExists = false
-		}
-	} else if size == 0 {
-		// startUpload always creates a 0-byte file. If it's still 0 bytes,
-		// no PATCH was performed and we should use the monolithic upload optimization.
-		tempFileExists = false
-	}
-
-	// If there's a body, append it (monolithic upload or final chunk)
-	if req.ContentLength > 0 || req.Body != http.NoBody {
-		if tempFileExists {
-			// Chunked upload: append final chunk to existing temp file
-			appender, err := r.storage.Appender(req.Context(), tempPath)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			_, err = io.Copy(appender, io.LimitReader(req.Body, maxUploadBytes))
-
-			// Always check close error, as this flushes the buffer to disk
-			closeErr := appender.Close()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if closeErr != nil {
-				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			// For chunked uploads, we must read the entire accumulated file to compute hash
-			reader, err := r.storage.Reader(req.Context(), tempPath, 0)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			hasher := sha256.New()
-			size, err = io.Copy(hasher, reader)
-			reader.Close()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-		} else {
-			// Monolithic upload: CRITICAL FIX - compute digest DURING upload
-			// This eliminates the blocking re-read for large layers (common case)
-			appender, err := r.storage.Appender(req.Context(), tempPath)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			hasher := sha256.New()
-			multiWriter := io.MultiWriter(appender, hasher)
-			size, err = io.Copy(multiWriter, io.LimitReader(req.Body, maxUploadBytes))
-			
-			// Always check close error, as this flushes the buffer to disk
-			closeErr := appender.Close()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if closeErr != nil {
-				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
-				return
-			}
-			actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-		}
-	} else {
-		// No body - compute digest from existing temp file (chunked upload finalization)
-		reader, err := r.storage.Reader(req.Context(), tempPath, 0)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	existingSize, statErr := r.storage.Stat(req.Context(), tempPath)
+	hasBody := req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0
+	if errors.Is(statErr, storage.ErrNotFound) {
+		if !hasBody {
+			http.Error(w, "upload not found", http.StatusNotFound)
 			return
 		}
+		existingSize = 0
+	} else if statErr != nil {
+		http.Error(w, statErr.Error(), http.StatusInternalServerError)
+		return
+	}
 
-		hasher := sha256.New()
-		size, err = io.Copy(hasher, reader)
-		reader.Close()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	if hasBody {
+		remaining := maxUploadBytes - existingSize
+		if remaining < 0 || req.ContentLength > remaining {
+			http.Error(w, "upload exceeds maximum size", http.StatusRequestEntityTooLarge)
 			return
 		}
-
-		actualDigest = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+		appender, appendErr := r.storage.Appender(req.Context(), tempPath)
+		if appendErr != nil {
+			http.Error(w, appendErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		limitedBody := http.MaxBytesReader(w, req.Body, remaining)
+		_, copyErr := io.Copy(appender, limitedBody)
+		closeErr := appender.Close()
+		if copyErr != nil {
+			r.storage.Delete(req.Context(), tempPath)
+			var maxErr *http.MaxBytesError
+			if errors.As(copyErr, &maxErr) {
+				http.Error(w, "upload exceeds maximum size", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, copyErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if closeErr != nil {
+			http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
+
+	reader, err := r.storage.Reader(req.Context(), tempPath, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasher := sha256.New()
+	size, hashErr := io.Copy(hasher, reader)
+	closeErr := reader.Close()
+	if hashErr != nil {
+		http.Error(w, hashErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if closeErr != nil {
+		http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	actualDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
 	// Verify digest matches expected
 	if actualDigest != digest {
@@ -1126,7 +1313,14 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 	// Use singleflight to deduplicate concurrent finalizations of the same
 	// digest. Only the first caller performs the move+DB write; others share
 	// the result.
-	_, err, _ = r.blobGroup.Do(digest, func() (interface{}, error) {
+	_, err, _ = r.blobGroup.Do(fullRepo+"\x00"+digest, func() (interface{}, error) {
+		// Another upload session or process may have completed while this
+		// request was hashing. Do not overwrite or double-charge it.
+		if _, statErr := r.storage.Stat(req.Context(), finalPath); statErr == nil {
+			return nil, nil
+		} else if !errors.Is(statErr, storage.ErrNotFound) {
+			return nil, statErr
+		}
 		// 1. Move the verified temp file to final location.
 		if moveErr := r.storage.Move(req.Context(), tempPath, finalPath); moveErr != nil {
 			return nil, moveErr
@@ -1137,7 +1331,9 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 				return err
 			}
 			if quota != nil {
-				r.db.UpdateQuotaUsage(ctx, quotaNs, size)
+				if err := r.db.UpdateQuotaUsage(ctx, quotaNs, size); err != nil {
+					return err
+				}
 			}
 			return nil
 		})
@@ -1151,9 +1347,9 @@ func (r *Router) putUpload(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	// Upload is finalized; remove the per-UUID mutex so it can be GC'd.
-	r.uploadMu.Delete(uuid)
+	// A singleflight follower still owns its temporary file; the leader moved
+	// its file already, making this deletion a harmless not-found operation.
+	r.storage.Delete(req.Context(), tempPath)
 
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", fullRepo, digest))
 	w.Header().Set("Docker-Content-Digest", digest)

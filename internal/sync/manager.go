@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	godigest "github.com/opencontainers/go-digest"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/config"
 	"github.com/ryan/ads-registry/internal/db"
@@ -21,28 +22,28 @@ import (
 
 // Manager handles background synchronization of images to peer registries
 type Manager struct {
-	peers       []config.PeerRegistry
-	starlark    *automation.Engine
-	jobQueue    chan SyncJob
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
-	db          db.Store
-	storage     storage.Provider
-	localHost   string // Local registry hostname for pulling content
-	httpClient  *http.Client
-	metrics     *SyncMetrics
-	metricsMu   sync.RWMutex
+	peers      []config.PeerRegistry
+	starlark   *automation.Engine
+	jobQueue   chan SyncJob
+	wg         sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	db         db.Store
+	storage    storage.Provider
+	localHost  string // Local registry hostname for pulling content
+	httpClient *http.Client
+	metrics    *SyncMetrics
+	metricsMu  sync.RWMutex
 }
 
 // SyncMetrics tracks synchronization statistics for monitoring
 type SyncMetrics struct {
-	TotalJobs       int64
-	SuccessfulJobs  int64
-	FailedJobs      int64
-	TotalBytesSync  int64
-	LastSyncTime    time.Time
-	AverageLatency  time.Duration
+	TotalJobs      int64
+	SuccessfulJobs int64
+	FailedJobs     int64
+	TotalBytesSync int64
+	LastSyncTime   time.Time
+	AverageLatency time.Duration
 }
 
 type SyncJob struct {
@@ -145,7 +146,7 @@ func (m *Manager) processJob(job SyncJob) {
 				log.Printf("[SyncManager] Starlark policy error for %s: %v", peer.Name, err)
 				// Fail-safe: if script exists but errors, block it. If script missing, default allow?
 				// For compliance safety, better to block if policy errors. But here we assume missing = false error.
-				allowed = false 
+				allowed = false
 			}
 		}
 
@@ -304,6 +305,12 @@ func (m *Manager) parseManifestLayers(manifestData []byte, mediaType string) (la
 
 // syncBlob ensures a blob exists on the peer registry
 func (m *Manager) syncBlob(ctx context.Context, blobDigest, repo string, peer config.PeerRegistry) error {
+	parsedDigest, err := godigest.Parse(blobDigest)
+	if err != nil {
+		return fmt.Errorf("invalid blob digest: %w", err)
+	}
+	blobDigest = parsedDigest.String()
+
 	// Step 1: Check if blob already exists on peer (HEAD request)
 	exists, err := m.blobExistsOnPeer(ctx, blobDigest, repo, peer)
 	if err != nil {
@@ -317,7 +324,7 @@ func (m *Manager) syncBlob(ctx context.Context, blobDigest, repo string, peer co
 	}
 
 	// Step 2: Read blob from local storage
-	blobPath := m.getBlobPath(blobDigest)
+	blobPath := storage.BlobPath(repo, parsedDigest.String())
 	reader, err := m.storage.Reader(ctx, blobPath, 0)
 	if err != nil {
 		return fmt.Errorf("read local blob: %w", err)
@@ -471,21 +478,6 @@ func (m *Manager) pushManifestToPeer(ctx context.Context, repo, reference string
 	log.Printf("[SyncManager] Pushed manifest %s:%s to %s (digest: %s)", repo, reference, peer.Name, manifestDigest)
 
 	return nil
-}
-
-// getBlobPath constructs the storage path for a blob digest
-func (m *Manager) getBlobPath(blobDigest string) string {
-	// Parse digest (format: sha256:abc123...)
-	parts := strings.SplitN(blobDigest, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	algorithm := parts[0]
-	hash := parts[1]
-
-	// Standard Docker registry layout: blobs/<algorithm>/<first-two-chars>/<hash>/data
-	return fmt.Sprintf("blobs/%s/%s/%s/data", algorithm, hash[:2], hash)
 }
 
 // updateMetrics updates sync metrics for monitoring

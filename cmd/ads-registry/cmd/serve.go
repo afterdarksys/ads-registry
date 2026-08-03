@@ -19,13 +19,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/ryan/ads-registry/internal/api/artifacts"
 	"github.com/ryan/ads-registry/internal/api/auth"
+	"github.com/ryan/ads-registry/internal/api/formats"
 	"github.com/ryan/ads-registry/internal/api/management"
 	apimw "github.com/ryan/ads-registry/internal/api/middleware"
 	tenancyAPI "github.com/ryan/ads-registry/internal/api/tenancy"
 	v2 "github.com/ryan/ads-registry/internal/api/v2"
-	"github.com/ryan/ads-registry/internal/api/formats"
-	"github.com/ryan/ads-registry/internal/api/artifacts"
 	registryAuth "github.com/ryan/ads-registry/internal/auth"
 	"github.com/ryan/ads-registry/internal/automation"
 	"github.com/ryan/ads-registry/internal/cache"
@@ -34,11 +34,11 @@ import (
 	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/db/postgres"
 	"github.com/ryan/ads-registry/internal/db/sqlite"
+	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/health"
 	"github.com/ryan/ads-registry/internal/logger"
 	"github.com/ryan/ads-registry/internal/logging"
 	"github.com/ryan/ads-registry/internal/policy"
-	"github.com/ryan/ads-registry/internal/events"
 	"github.com/ryan/ads-registry/internal/queue"
 	"github.com/ryan/ads-registry/internal/scanner"
 	"github.com/ryan/ads-registry/internal/scanner/trivy"
@@ -74,9 +74,9 @@ func init() {
 func configureHTTPTransport() {
 	http.DefaultTransport = &http.Transport{
 		// Connection pooling - critical for upstream registry proxying
-		MaxIdleConns:        1000,            // Total idle connections across all hosts
-		MaxIdleConnsPerHost: 100,             // Idle per upstream registry
-		MaxConnsPerHost:     0,               // Unlimited active connections
+		MaxIdleConns:        1000,             // Total idle connections across all hosts
+		MaxIdleConnsPerHost: 100,              // Idle per upstream registry
+		MaxConnsPerHost:     0,                // Unlimited active connections
 		IdleConnTimeout:     90 * time.Second, // Keep idle connections alive
 
 		// Timeouts
@@ -399,7 +399,6 @@ func runServer() {
 		logger.Warning("Upstream registries require PostgreSQL - upstream features disabled with SQLite")
 	}
 
-
 	// 4. Router
 	r := chi.NewRouter()
 
@@ -468,7 +467,7 @@ func runServer() {
 	if cfg.Server.DeveloperMode {
 		logger.Info("DEVELOPER MODE ACTIVATED: Security bypassed, trace dumping enabled, pprof exposing on /debug/pprof")
 		r.Use(apimw.OCIDebugger())
-		
+
 		r.HandleFunc("/debug/pprof/", pprof.Index)
 		r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		r.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -494,7 +493,7 @@ func runServer() {
 	broker := events.NewBroker()
 	engines := []scanner.Engine{
 		trivy.New("/tmp/trivy-cache"),
-		scanner.NewStaticAnalyzer(storageProvider), // Static analysis with Semgrep
+		scanner.NewStaticAnalyzer(storageProvider, store), // Static analysis with Semgrep
 	}
 
 	// Choose scanner implementation based on database driver and queue configuration
@@ -728,7 +727,7 @@ func runServer() {
 			TLSConfig: &tls.Config{
 				MinVersion: minTLSVersion(cfg.Compatibility.TLSCompatibility.MinTLSVersion),
 			},
-			TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
+			TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // Disable HTTP/2
 			// Apply same TCP optimizations to TLS connections
 			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 				if tcpConn, ok := c.(*net.TCPConn); ok {

@@ -32,6 +32,11 @@ Thumbs.db
 # Env files
 .env
 .env.local
+authentik.env
+
+# Locally generated TLS and token-signing private keys
+certs/*.key
+keys/*.key
 ads-registry-test
 ads-registry-linux
 ads-registry-linux-cgo

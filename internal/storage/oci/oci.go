@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
+	"github.com/oracle/oci-go-sdk/v65/objectstorage/transfer"
 	"github.com/ryan/ads-registry/internal/storage"
 )
 
@@ -109,35 +109,19 @@ func parsePrivateKey(keyData []byte) (*rsa.PrivateKey, error) {
 
 // Writer returns a WriteCloser for uploading a blob
 func (s *Store) Writer(ctx context.Context, path string) (io.WriteCloser, error) {
-	return &ociWriter{
-		store:  s,
-		path:   path,
-		buffer: &bytes.Buffer{},
-		ctx:    ctx,
-	}, nil
+	return s.newStreamWriter(ctx, path, nil), nil
 }
 
 // Appender returns a WriteCloser for appending to a blob
 func (s *Store) Appender(ctx context.Context, path string) (io.WriteCloser, error) {
-	// Read existing data
-	var existingData bytes.Buffer
 	reader, err := s.Reader(ctx, path, 0)
 	if err != nil && err != storage.ErrNotFound {
 		return nil, err
 	}
-	if err == nil {
-		defer reader.Close()
-		if _, err := io.Copy(&existingData, reader); err != nil {
-			return nil, err
-		}
+	if err == storage.ErrNotFound {
+		reader = nil
 	}
-
-	return &ociWriter{
-		store:  s,
-		path:   path,
-		buffer: &existingData,
-		ctx:    ctx,
-	}, nil
+	return s.newStreamWriter(ctx, path, reader), nil
 }
 
 // Reader returns a ReadCloser for downloading a blob
@@ -198,27 +182,18 @@ func (s *Store) Stat(ctx context.Context, path string) (int64, error) {
 	return *resp.ContentLength, nil
 }
 
-// ociWriter implements io.WriteCloser for OCI uploads
-type ociWriter struct {
-	store  *Store
-	path   string
-	buffer *bytes.Buffer
-	ctx    context.Context
-}
-
-func (w *ociWriter) Write(p []byte) (n int, err error) {
-	return w.buffer.Write(p)
-}
-
-func (w *ociWriter) Close() error {
-	// Upload the buffered data
-	contentLength := int64(w.buffer.Len())
-	_, err := w.store.client.PutObject(w.ctx, objectstorage.PutObjectRequest{
-		NamespaceName: common.String(w.store.namespace),
-		BucketName:    common.String(w.store.bucket),
-		ObjectName:    common.String(w.path),
-		ContentLength: &contentLength,
-		PutObjectBody: io.NopCloser(bytes.NewReader(w.buffer.Bytes())),
-	})
-	return err
+func (s *Store) newStreamWriter(ctx context.Context, path string, prefix io.ReadCloser) io.WriteCloser {
+	uploader := transfer.NewUploadManager()
+	return storage.NewStreamWriter(func(body io.Reader) error {
+		_, err := uploader.UploadStream(ctx, transfer.UploadStreamRequest{
+			UploadRequest: transfer.UploadRequest{
+				NamespaceName:       common.String(s.namespace),
+				BucketName:          common.String(s.bucket),
+				ObjectName:          common.String(path),
+				ObjectStorageClient: s.client,
+			},
+			StreamReader: body,
+		})
+		return err
+	}, prefix)
 }

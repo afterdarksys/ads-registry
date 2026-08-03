@@ -33,7 +33,7 @@ func (m *MemoryProvider) Reader(ctx context.Context, path string, offset int64) 
 
 	data, exists := m.data[path]
 	if !exists {
-		return nil, io.EOF
+		return nil, ErrNotFound
 	}
 
 	if offset > int64(len(data)) {
@@ -64,7 +64,7 @@ func (m *MemoryProvider) Move(ctx context.Context, sourcePath, destPath string) 
 
 	data, exists := m.data[sourcePath]
 	if !exists {
-		return io.EOF
+		return ErrNotFound
 	}
 
 	m.data[destPath] = data
@@ -78,7 +78,7 @@ func (m *MemoryProvider) Stat(ctx context.Context, path string) (int64, error) {
 
 	data, exists := m.data[path]
 	if !exists {
-		return 0, io.EOF
+		return 0, ErrNotFound
 	}
 
 	return int64(len(data)), nil

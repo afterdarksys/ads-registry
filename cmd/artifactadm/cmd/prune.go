@@ -88,10 +88,10 @@ func runPrune() {
 	}
 
 	var result struct {
-		DryRun         bool     `json:"dry_run"`
-		PackagesScanned int     `json:"packages_scanned"`
-		VersionsDeleted int     `json:"versions_deleted"`
-		SpaceFreed     int64    `json:"space_freed"`
+		DryRun          bool  `json:"dry_run"`
+		PackagesScanned int   `json:"packages_scanned"`
+		VersionsDeleted int   `json:"versions_deleted"`
+		SpaceFreed      int64 `json:"space_freed"`
 		DeletedVersions []struct {
 			Package string `json:"package"`
 			Version string `json:"version"`
@@ -105,7 +105,8 @@ func runPrune() {
 	}
 
 	if result.DryRun {
-		fmt.Println("=== DRY RUN MODE - No changes made ===\n")
+		fmt.Println("=== DRY RUN MODE - No changes made ===")
+		fmt.Println()
 	}
 
 	fmt.Printf("Packages scanned: %d\n", result.PackagesScanned)

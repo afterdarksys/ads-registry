@@ -1,10 +1,12 @@
+//go:build ignore
+
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
-	
+
 	"github.com/ryan/ads-registry/internal/config"
 	"github.com/ryan/ads-registry/internal/db/sqlite"
 )
@@ -19,7 +21,7 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("DB connected")
-	
+
 	mt, d, p, err := db.GetManifest(context.Background(), "alpine", "sha256:16ee56ecca54b715d51fe825bb28ec72918c38b0ad85a763fd8310426336dbd7")
 	if err != nil {
 		fmt.Printf("GetManifest Error: %v\n", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/bits"
 	"os"
@@ -13,26 +12,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryan/ads-registry/internal/db"
 	"github.com/ryan/ads-registry/internal/storage"
 )
 
 // StaticAnalyzer performs static analysis on container images
 type StaticAnalyzer struct {
-	semgrepPath  string
-	rulesPath    string
-	tempDir      string
-	detectors    []SecretDetector
-	storage      storage.Provider
+	semgrepPath string
+	rulesPath   string
+	tempDir     string
+	detectors   []SecretDetector
+	storage     storage.Provider
+	db          db.Store
 }
 
 // NewStaticAnalyzer creates a new static analyzer
-func NewStaticAnalyzer(sp storage.Provider) *StaticAnalyzer {
+func NewStaticAnalyzer(sp storage.Provider, dbStore db.Store) *StaticAnalyzer {
 	return &StaticAnalyzer{
 		semgrepPath: findSemgrepBinary(),
 		rulesPath:   "/etc/semgrep/rules",
 		tempDir:     "/tmp/static-analysis",
 		detectors:   initializeSecretDetectors(),
 		storage:     sp,
+		db:          dbStore,
 	}
 }
 
@@ -53,7 +55,7 @@ func (s *StaticAnalyzer) Scan(ctx context.Context, namespace, repo, digest strin
 	defer os.RemoveAll(extractPath) // Cleanup after scan
 
 	// 2. Download and extract image layers
-	if err := s.extractImageLayers(ctx, digest, extractPath); err != nil {
+	if err := ExtractImageLayers(ctx, s.db, s.storage, namespace, repo, digest, extractPath); err != nil {
 		return nil, fmt.Errorf("failed to extract image: %w", err)
 	}
 
@@ -73,51 +75,6 @@ func (s *StaticAnalyzer) Scan(ctx context.Context, namespace, repo, digest strin
 	log.Printf("[StaticAnalyzer] Detailed report saved to %s", reportPath)
 
 	return report, nil
-}
-
-// extractImageLayers extracts container image layers to a directory
-func (s *StaticAnalyzer) extractImageLayers(ctx context.Context, digest, destDir string) error {
-	log.Printf("[StaticAnalyzer] Extracting image layers for %s", digest)
-
-	// Construct blob path (blobs/sha256/abc123...)
-	blobPath := fmt.Sprintf("blobs/%s", digest)
-
-	// Get blob size
-	size, err := s.storage.Stat(ctx, blobPath)
-	if err != nil {
-		return fmt.Errorf("failed to stat blob: %w", err)
-	}
-
-	// Get blob from storage using Reader
-	blobReader, err := s.storage.Reader(ctx, blobPath, 0)
-	if err != nil {
-		return fmt.Errorf("failed to get blob: %w", err)
-	}
-	defer blobReader.Close()
-
-	log.Printf("[StaticAnalyzer] Downloaded blob %s (size: %d bytes)", digest, size)
-
-	// For now, save the tarball and extract it
-	tarPath := filepath.Join(destDir, "image.tar")
-	tarFile, err := os.Create(tarPath)
-	if err != nil {
-		return fmt.Errorf("failed to create tar file: %w", err)
-	}
-	defer tarFile.Close()
-
-	if _, err := io.Copy(tarFile, blobReader); err != nil {
-		return fmt.Errorf("failed to write tar: %w", err)
-	}
-
-	// Extract tarball using tar command
-	cmd := exec.CommandContext(ctx, "tar", "-xf", tarPath, "-C", destDir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[StaticAnalyzer] Tar extraction output: %s", string(output))
-		return fmt.Errorf("tar extraction failed: %w", err)
-	}
-
-	log.Printf("[StaticAnalyzer] Successfully extracted image to %s", destDir)
-	return nil
 }
 
 // convertToScannerReport converts StaticAnalysisReport to standard scanner.Report
@@ -176,42 +133,42 @@ func (s *StaticAnalyzer) convertToScannerReport(staticReport *StaticAnalysisRepo
 
 // StaticAnalysisReport represents the results of static analysis
 type StaticAnalysisReport struct {
-	Digest      string                `json:"digest"`
-	ScanTime    time.Time             `json:"scan_time"`
-	Secrets     []SecretFinding       `json:"secrets"`
-	CodeSmells  []CodeSmellFinding    `json:"code_smells"`
-	Security    []SecurityFinding     `json:"security_findings"`
-	Dockerfile  *DockerfileAnalysis   `json:"dockerfile,omitempty"`
-	Summary     StaticAnalysisSummary `json:"summary"`
+	Digest     string                `json:"digest"`
+	ScanTime   time.Time             `json:"scan_time"`
+	Secrets    []SecretFinding       `json:"secrets"`
+	CodeSmells []CodeSmellFinding    `json:"code_smells"`
+	Security   []SecurityFinding     `json:"security_findings"`
+	Dockerfile *DockerfileAnalysis   `json:"dockerfile,omitempty"`
+	Summary    StaticAnalysisSummary `json:"summary"`
 }
 
 // SecretFinding represents a detected secret
 type SecretFinding struct {
-	Type        string  `json:"type"`         // api_key, password, private_key, aws_access_key, etc.
-	FilePath    string  `json:"file_path"`
-	LineNumber  int     `json:"line_number"`
-	Snippet     string  `json:"snippet"`      // Redacted snippet
-	Entropy     float64 `json:"entropy"`      // Shannon entropy score
-	Confidence  string  `json:"confidence"`   // high, medium, low
-	Severity    string  `json:"severity"`     // critical, high, medium
+	Type       string  `json:"type"` // api_key, password, private_key, aws_access_key, etc.
+	FilePath   string  `json:"file_path"`
+	LineNumber int     `json:"line_number"`
+	Snippet    string  `json:"snippet"`    // Redacted snippet
+	Entropy    float64 `json:"entropy"`    // Shannon entropy score
+	Confidence string  `json:"confidence"` // high, medium, low
+	Severity   string  `json:"severity"`   // critical, high, medium
 }
 
 // CodeSmellFinding represents code quality issues
 type CodeSmellFinding struct {
-	RuleID      string `json:"rule_id"`
-	Category    string `json:"category"`     // complexity, duplication, maintainability
-	FilePath    string `json:"file_path"`
-	LineNumber  int    `json:"line_number"`
-	Message     string `json:"message"`
-	Severity    string `json:"severity"`
-	Suggestion  string `json:"suggestion,omitempty"`
+	RuleID     string `json:"rule_id"`
+	Category   string `json:"category"` // complexity, duplication, maintainability
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+	Message    string `json:"message"`
+	Severity   string `json:"severity"`
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // SecurityFinding represents security vulnerabilities in code
 type SecurityFinding struct {
 	RuleID      string `json:"rule_id"`
-	CWE         string `json:"cwe,omitempty"`      // CWE-89, CWE-79, etc.
-	OWASP       string `json:"owasp,omitempty"`    // OWASP Top 10 category
+	CWE         string `json:"cwe,omitempty"`   // CWE-89, CWE-79, etc.
+	OWASP       string `json:"owasp,omitempty"` // OWASP Top 10 category
 	FilePath    string `json:"file_path"`
 	LineNumber  int    `json:"line_number"`
 	Description string `json:"description"`
@@ -221,12 +178,12 @@ type SecurityFinding struct {
 
 // DockerfileAnalysis represents Dockerfile-specific findings
 type DockerfileAnalysis struct {
-	HasRootUser       bool     `json:"has_root_user"`
-	HasSecretsInEnv   bool     `json:"has_secrets_in_env"`
-	UsesLatestTag     bool     `json:"uses_latest_tag"`
-	MissingHealthCheck bool    `json:"missing_health_check"`
-	Issues            []string `json:"issues"`
-	Score             int      `json:"score"` // 0-100
+	HasRootUser        bool     `json:"has_root_user"`
+	HasSecretsInEnv    bool     `json:"has_secrets_in_env"`
+	UsesLatestTag      bool     `json:"uses_latest_tag"`
+	MissingHealthCheck bool     `json:"missing_health_check"`
+	Issues             []string `json:"issues"`
+	Score              int      `json:"score"` // 0-100
 }
 
 // StaticAnalysisSummary provides summary statistics
@@ -245,11 +202,11 @@ func (s *StaticAnalyzer) Analyze(ctx context.Context, imageDigest, extractPath s
 	log.Printf("[StaticAnalyzer] Starting analysis for %s", imageDigest)
 
 	report := &StaticAnalysisReport{
-		Digest:   imageDigest,
-		ScanTime: time.Now(),
-		Secrets:  []SecretFinding{},
+		Digest:     imageDigest,
+		ScanTime:   time.Now(),
+		Secrets:    []SecretFinding{},
 		CodeSmells: []CodeSmellFinding{},
-		Security: []SecurityFinding{},
+		Security:   []SecurityFinding{},
 	}
 
 	// 1. Scan for secrets using pattern matching
@@ -493,11 +450,11 @@ type SemgrepOutput struct {
 }
 
 type SemgrepResult struct {
-	CheckID string             `json:"check_id"`
-	Path    string             `json:"path"`
-	Start   SemgrepLocation    `json:"start"`
-	End     SemgrepLocation    `json:"end"`
-	Extra   SemgrepExtra       `json:"extra"`
+	CheckID string          `json:"check_id"`
+	Path    string          `json:"path"`
+	Start   SemgrepLocation `json:"start"`
+	End     SemgrepLocation `json:"end"`
+	Extra   SemgrepExtra    `json:"extra"`
 }
 
 type SemgrepLocation struct {
@@ -506,9 +463,9 @@ type SemgrepLocation struct {
 }
 
 type SemgrepExtra struct {
-	Message  string `json:"message"`
-	Severity string `json:"severity"`
-	Fix      string `json:"fix,omitempty"`
+	Message  string                 `json:"message"`
+	Severity string                 `json:"severity"`
+	Fix      string                 `json:"fix,omitempty"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 

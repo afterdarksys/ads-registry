@@ -92,7 +92,8 @@ func runStats() {
 		return
 	}
 
-	fmt.Println("=== Repository Statistics ===\n")
+	fmt.Println("=== Repository Statistics ===")
+	fmt.Println()
 	fmt.Printf("Total Packages: %d\n", stats.TotalPackages)
 	fmt.Printf("Total Versions: %d\n", stats.TotalVersions)
 	if stats.TotalSize > 0 {

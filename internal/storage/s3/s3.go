@@ -1,7 +1,6 @@
 package s3
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ryan/ads-registry/internal/storage"
 )
@@ -60,36 +60,20 @@ func New(endpoint, region, bucket, accessKey, secretKey string, usePathStyle boo
 
 // Writer returns a WriteCloser for uploading a blob
 func (s *Store) Writer(ctx context.Context, path string) (io.WriteCloser, error) {
-	return &s3Writer{
-		store:  s,
-		path:   path,
-		buffer: &bytes.Buffer{},
-		ctx:    ctx,
-	}, nil
+	return s.newStreamWriter(ctx, path, nil), nil
 }
 
 // Appender returns a WriteCloser for appending to a blob
 // Note: S3 doesn't support true appending, so we read existing data and append
 func (s *Store) Appender(ctx context.Context, path string) (io.WriteCloser, error) {
-	// Read existing data
-	var existingData bytes.Buffer
 	reader, err := s.Reader(ctx, path, 0)
 	if err != nil && err != storage.ErrNotFound {
 		return nil, err
 	}
-	if err == nil {
-		defer reader.Close()
-		if _, err := io.Copy(&existingData, reader); err != nil {
-			return nil, err
-		}
+	if err == storage.ErrNotFound {
+		reader = nil
 	}
-
-	return &s3Writer{
-		store:  s,
-		path:   path,
-		buffer: &existingData,
-		ctx:    ctx,
-	}, nil
+	return s.newStreamWriter(ctx, path, reader), nil
 }
 
 // Reader returns a ReadCloser for downloading a blob
@@ -149,24 +133,14 @@ func (s *Store) Stat(ctx context.Context, path string) (int64, error) {
 	return aws.ToInt64(result.ContentLength), nil
 }
 
-// s3Writer implements io.WriteCloser for S3 uploads
-type s3Writer struct {
-	store  *Store
-	path   string
-	buffer *bytes.Buffer
-	ctx    context.Context
-}
-
-func (w *s3Writer) Write(p []byte) (n int, err error) {
-	return w.buffer.Write(p)
-}
-
-func (w *s3Writer) Close() error {
-	// Upload the buffered data
-	_, err := w.store.client.PutObject(w.ctx, &s3.PutObjectInput{
-		Bucket: aws.String(w.store.bucket),
-		Key:    aws.String(w.path),
-		Body:   bytes.NewReader(w.buffer.Bytes()),
-	})
-	return err
+func (s *Store) newStreamWriter(ctx context.Context, path string, prefix io.ReadCloser) io.WriteCloser {
+	uploader := manager.NewUploader(s.client)
+	return storage.NewStreamWriter(func(body io.Reader) error {
+		_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(path),
+			Body:   body,
+		})
+		return err
+	}, prefix)
 }
