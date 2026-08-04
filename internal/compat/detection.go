@@ -329,10 +329,23 @@ func (info *ClientInfo) MatchesVersion(pattern string) bool {
 		return true
 	}
 
-	// Wildcard matching
+	// Wildcard matching on version-segment boundaries. A raw string prefix
+	// over-matches: "29.1.*" would match 29.10.x/29.19.x, wrongly activating
+	// version-specific workarounds (e.g. docker_29_force_close_blobs, which the
+	// caller scopes to 29.0-29.2 only). Compare dot-separated segments instead.
 	if strings.HasSuffix(pattern, ".*") {
 		prefix := strings.TrimSuffix(pattern, ".*")
-		return strings.HasPrefix(info.Version, prefix)
+		prefixSegs := strings.Split(prefix, ".")
+		verSegs := strings.Split(info.Version, ".")
+		if len(verSegs) < len(prefixSegs) {
+			return false
+		}
+		for i, seg := range prefixSegs {
+			if verSegs[i] != seg {
+				return false
+			}
+		}
+		return true
 	}
 
 	// Major version only
